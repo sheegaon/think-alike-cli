@@ -17,6 +17,21 @@ DEFAULT_CFG = {
     "WS_NAMESPACE": "/",
     "ENDPOINTS": {
         "health": {"method": "GET", "path": "/health"},
+        "players_create": {"method": "POST", "path": "/players"},
+        "players_get": {"method": "GET", "path": "/players/{player_id}"},
+        "players_by_username": {"method": "GET", "path": "/players/username/{username}"},
+        "players_stats": {"method": "GET", "path": "/players/{player_id}/stats"},
+        "players_claim_reward": {"method": "POST", "path": "/players/{player_id}/claim-reward"},
+        "players_anonymous": {"method": "GET", "path": "/players/anonymous"},
+        "rooms_list": {"method": "GET", "path": "/rooms"},
+        "rooms_get": {"method": "GET", "path": "/rooms/{room_key}"},
+        "rooms_join": {"method": "POST", "path": "/rooms/join"},
+        "rooms_quick_join": {"method": "POST", "path": "/rooms/quick-join"},
+        "rooms_leave": {"method": "POST", "path": "/rooms/leave"},
+        "rooms_skip": {"method": "POST", "path": "/rooms/skip"},
+        "rooms_events": {"method": "GET", "path": "/rooms/{room_key}/events"},
+        "leaderboard": {"method": "GET", "path": "/leaderboard"},
+        "game_stats": {"method": "GET", "path": "/game/stats"}
     }
 }
 
@@ -124,26 +139,26 @@ Home:
 Player:
   p get [username]      Create or fetch named player (GET /players/username/<u> or POST /players)
   p me                  Print current session (player_id, username, room)
+  p stats               GET /players/{player_id}/stats
+  p claim <quest_id>    POST /players/{player_id}/claim-reward
+  p anon [limit]        GET /players/anonymous
 
 Rooms:
-  r list
-  r join c              POST /rooms/quick-join (casual)
-  r join o              POST /rooms/quick-join (competitive)
-  r join h              POST /rooms/quick-join (high_stakes)
-  r join <room_key>     POST /rooms/join (as player)
+  r list [tier]         GET /rooms (optionally filter by tier)
+  r get <room_key>      GET /rooms/{room_key}
+  r events [limit]      GET /rooms/{room_key}/events
+  r join c|o|h|<key>    POST /rooms/quick-join or /rooms/join
   r obs <room_key>      POST /rooms/join as spectator
-  r leave               POST /rooms/leave
+  r leave [immediate]   POST /rooms/leave
   r skip                POST /rooms/skip
 
 Meta:
-  lb                    GET /leaderboard
+  lb [limit]            GET /leaderboard
   stats                 GET /game/stats
 
 Round (WebSocket):
   ws on                 Connect WS
   ws off                Disconnect WS
-  ws jp                 emit join_player
-  ws jr                 emit join_room
   ws commit <idx>       emit commit
   ws reveal             emit reveal
   ws queue on|off       spectator_queue
@@ -156,8 +171,9 @@ def main():
     cfg = load_cfg()
     print(f"[BOOT] cfg: {json.dumps(cfg, indent=2)}")
     rest = REST(cfg["API_BASE"], cfg["ENDPOINTS"])
-    ws = None
     sess = Session()
+    ws = WS(cfg["WS_URL"], cfg.get("WS_NAMESPACE", "/"))
+    ws.connect()
 
     print("\n===== Think Alike CLI =====")
     print("Quick-start: 'p get <username>' create or fetch player, "
@@ -185,7 +201,11 @@ def main():
             if root in ("help", "?", "h"):
                 print(HELP)
 
-            # REST API /players calls
+            if root[0] == 'q':
+                print("[BOOT] Bye.")
+                break
+
+            # REST API /players calls and WebSocket join_player
             if root[0] == "p":
                 if cmd == "get" or cmd == "g":
                     if not args:
@@ -196,19 +216,65 @@ def main():
                     if not (isinstance(data, dict) and ("player_id" in data or "id" in data)):
                         data = rest.call("players_create", body={"username": username})
                     if isinstance(data, dict):
-                        sess.player_id = data["player_id"] if "player_id" in data else data["id"]
-                        sess.username = data["username"] if "username" in data else username
-                    print(f"[STATE] {sess.player_id=} {sess.username=}")
+                        sess.player_id = str(data["id"]) if "id" in data else str(data["player_id"])
+                        sess.username = data["username"]
+                    print(f"[STATE] player_id={sess.player_id} username={sess.username}")
+                    if not ws:
+                        print("[WARN] WS not connected")
+                        continue
+                    ws.emit("join_player", {"player_id": sess.player_id, "username": sess.username})
 
-                if cmd == "me":
-                    print(json.dumps(
-                        {"player_id": sess.player_id, "username": sess.username, "room_key": sess.room_key},
-                        indent=2))
+                elif cmd == "me":
+                    print(json.dumps({
+                        "player_id": sess.player_id,
+                        "username": sess.username,
+                        "room_key": sess.room_key
+                    }, indent=2))
 
-            # REST API /rooms calls
+                elif cmd == "stats" or cmd == "st":
+                    if not sess.player_id:
+                        print("[WARN] No player selected. Use 'p get <username>' first.")
+                        continue
+                    data = rest.call("players_stats", path={"player_id": sess.player_id})
+                    if isinstance(data, dict):
+                        print(f"[STATS] Games: {data.get('games_played', 0)}, "
+                              f"Wins: {data.get('wins', 0)}, "
+                              f"Win Rate: {data.get('win_rate', 0):.1f}%")
+
+                elif cmd == "claim" or cmd == "cl":
+                    if not args:
+                        print("Usage: p claim <quest_id>")
+                        continue
+                    if not sess.player_id:
+                        print("[WARN] No player selected. Use 'p get <username>' first.")
+                        continue
+                    quest_id = args[0]
+                    data = rest.call("players_claim_reward",
+                                     path={"player_id": sess.player_id},
+                                     body={"quest_id": quest_id, "player_id": int(sess.player_id)})
+                    if isinstance(data, dict) and data["success"]:
+                        print(f"[REWARD] Claimed {data.get('reward_amount', 0)} coins! "
+                              f"New balance: {data.get('new_balance', 0)}")
+
+                elif cmd == "anon" or cmd == "a":
+                    limit = int(args[0]) if args and args[0].isdigit() else 20
+                    params = {"limit": limit}
+                    if sess.player_id:
+                        params["exclude_player_id"] = int(sess.player_id)
+                    data = rest.call("players_anonymous", params=params)
+                    if isinstance(data, list):
+                        print(f"[ANON] {len(data)} anonymous players:")
+                        for player in data[:10]:  # Show first 10
+                            print(f"  - {player['username']}: {player['rating']} rating, "
+                                  f"{player['win_rate']}% win rate")
+
+            # REST API /rooms calls and WebSocket join_room
             if root[0] == "r":
                 if cmd == "list" or cmd == "l":
-                    data = rest.call("rooms_list")
+                    params = {}
+                    if args and args[0] in ["casual", "competitive", "high_stakes"]:
+                        params["tier"] = args[0]
+                    data = rest.call("rooms_list", params=params)
                     if isinstance(data, dict):
                         rooms = data.get("rooms", [])
                         if not rooms:
@@ -216,61 +282,141 @@ def main():
                         else:
                             print(f"[STATE] {len(rooms)} rooms:")
                             for room in rooms:
-                                room_state = ', '.join([f'{key}: {room[key]}' for key in room if key != "room_key"])
-                                print(f"  - ...{room['room_key'][-5:]} ({room_state})")
+                                room_info = f"{room['tier']}, {room['player_count']}/{room['max_players']} players, " \
+                                            f"{room['stake']} stake, {room['state']}"
+                                print(f"  - ...{room['room_key'][-5:]} ({room_info})")
 
-                if cmd == "join" or cmd == "j":
+                elif cmd == "get" or cmd == "g":
                     if not args:
-                        print("Usage: r join <subcommand> [args]")
+                        print("Usage: r get <room_key>")
                         continue
-                    subcmd = args[0]
-                    if subcmd == "c":
-                        tier = "casual"
-                    elif subcmd == "o":
-                        tier = "competitive"
-                    elif subcmd == "h":
-                        tier = "high_stakes"
-                    else:
-                        print("Usage: r join c|o|h")
-                        continue
-                    data = rest.call("rooms_quick_join",
-                                     body={"player_id": sess.player_id, "tier": tier, "as_spectator": False})
+                    room_key = args[0]
+                    data = rest.call("rooms_get", path={"room_key": room_key})
                     if isinstance(data, dict):
-                        sess.room_key = data["room_key"] if "room_key" in data else data["id"]
-                        sess.room_token = data["room_token"] if "room_token" in data else data["token"]
-                        print(f"[STATE] room_key=...{sess.room_key[-5:]} room_token=...{sess.room_token[-5:]}")
+                        print(f"[ROOM] Tier: {data['tier']}, Players: {data['player_count']}/{data['max_players']}, "
+                              f"Stake: {data['stake']}, State: {data['state']}")
+                        if data["current_round"]:
+                            round_info = data["current_round"]
+                            print(f"[ROUND] Active: {round_info['adjective']} + {len(round_info['nouns'])} nouns, "
+                                  f"Phase: {round_info['phase']}")
 
-                if cmd == "obs" or cmd == "o":
-                    if not args:
-                        print("Usage: obs <room_key>")
-                        continue
-                    rk = args[0]
-                    data = rest.call("rooms_join",
-                                     body={"room_key": rk, "as_spectator": True, "player_id": sess.player_id})
-                    if isinstance(data, dict):
-                        sess.room_key = rk
-                        sess.room_token = data["room_token"] if "room_token" in data else data["token"]
-                        print(f"[STATE] observing room_key={sess.room_key}")
-
-                if cmd == "leave":
-                    data = rest.call("rooms_leave",
-                                     body={"room_key": sess.room_key, "player_id": sess.player_id})
-                    if isinstance(data, dict):
-                        print(f"[STATE] leaving room_key=...{data['room_key'][-5:]} success={data['success']}")
-                        sess.room_key = None
-                        sess.room_token = None
-
-                if cmd == "skip":
+                elif cmd == "events" or cmd == "ev":
                     if not sess.room_key:
                         print("[WARN] Not in a room")
                         continue
-                    rest.call("rooms_skip", body={"room_key": sess.room_key})
+                    params = {"limit": int(args[0])} if args and args[0].isdigit() else {"limit": 20}
+                    data = rest.call("rooms_events", path={"room_key": sess.room_key}, params=params)
+                    if isinstance(data, dict):
+                        events = data.get("events", [])
+                        print(f"[EVENTS] {len(events)} recent events:")
+                        for event in events:
+                            timestamp = event["timestamp"][:19]  # Remove microseconds
+                            print(f"  - {timestamp}: {event['event_type']} - {event.get('details', {})}")
 
-            # Meta HTTP
+                elif cmd == "join" or cmd == "j":
+                    if not args:
+                        print("Usage: r join c|o|h|<room_key>")
+                        continue
+                    subcmd = args[0]
+                    if subcmd in ["c", "o", "h"]:
+                        # Quick join by tier
+                        tier_map = {"c": "casual", "o": "competitive", "h": "high_stakes"}
+                        tier = tier_map[subcmd]
+                        if not sess.player_id:
+                            print("[WARN] No player selected. Use 'p get <username>' first.")
+                            continue
+                        data = rest.call("rooms_quick_join",
+                                         body={"player_id": int(sess.player_id), "tier": tier, "as_spectator": False})
+                        if isinstance(data, dict):
+                            sess.room_key = data["room_key"]
+                            sess.room_token = data["room_token"]
+                            print(
+                                f"[STATE] Joined {tier} room: ...{sess.room_key[-5:] if sess.room_key else 'unknown'}")
+                            if not ws:
+                                print("[WARN] WS not connected")
+                                continue
+                            ws.emit("join_room", {"room_token": sess.room_token})
+                    else:
+                        # Join specific room by key
+                        room_key = subcmd
+                        if not sess.player_id:
+                            print("[WARN] No player selected. Use 'p get <username>' first.")
+                            continue
+                        data = rest.call("rooms_join",
+                                         body={"room_key": room_key, "player_id": int(sess.player_id),
+                                               "username": sess.username, "balance": 1000, "as_spectator": False})
+                        if isinstance(data, dict) and data["success"]:
+                            sess.room_key = room_key
+                            sess.room_token = data["room_token"]
+                            print(f"[STATE] Joined room: ...{sess.room_key[-5:]}")
+
+                elif cmd == "obs" or cmd == "o":
+                    if not args:
+                        print("Usage: r obs <room_key>")
+                        continue
+                    room_key = args[0]
+                    if not sess.player_id:
+                        print("[WARN] No player selected. Use 'p get <username>' first.")
+                        continue
+                    data = rest.call("rooms_join",
+                                     body={"room_key": room_key, "player_id": int(sess.player_id),
+                                           "username": sess.username, "balance": 1000, "as_spectator": True})
+                    if isinstance(data, dict) and data["success"]:
+                        sess.room_key = room_key
+                        sess.room_token = data["room_token"]
+                        print(f"[STATE] Observing room: ...{sess.room_key[-5:]}")
+
+                elif cmd == "leave":
+                    if not sess.room_key:
+                        print("[WARN] Not in a room")
+                        continue
+                    at_round_end = "immediate" not in args
+                    data = rest.call("rooms_leave",
+                                     body={"room_key": sess.room_key, "player_id": int(sess.player_id),
+                                           "at_round_end": at_round_end})
+                    if isinstance(data, dict) and data["success"]:
+                        action = "scheduled leave" if data["scheduled"] else "left"
+                        print(f"[STATE] {action} from room: ...{sess.room_key[-5:]}")
+                        if not data["scheduled"]:
+                            sess.room_key = None
+                            sess.room_token = None
+
+                elif cmd == "skip":
+                    if not sess.room_key:
+                        print("[WARN] Not in a room")
+                        continue
+                    data = rest.call("rooms_skip", body={"room_key": sess.room_key, "player_id": int(sess.player_id)})
+                    if isinstance(data, dict) and data["success"]:
+                        print("[STATE] Scheduled to skip next round")
+
+            # Meta HTTP calls
             elif root == "lb":
-                rest.call("leaderboard")
+                params = {}
+                if args:
+                    if args[0].isdigit():
+                        params["limit"] = int(args[0])
+                    if sess.player_id:
+                        params["current_player_id"] = int(sess.player_id)
+                data = rest.call("leaderboard", params=params)
+                if isinstance(data, dict):
+                    leaderboard = data.get("leaderboard", [])
+                    print(f"[LEADERBOARD] Top {len(leaderboard)} players:")
+                    for entry in leaderboard[:10]:  # Show top 10
+                        print(f"  #{entry['rank']}: {entry['username']} - {entry['rating']} rating, "
+                              f"{entry['win_rate']:.1f}% wins")
+                    if data["current_player_rank"]:
+                        print(f"[RANK] Your rank: #{data['current_player_rank']}")
+
             elif root == "stats":
-                rest.call("game_stats")
+                data = rest.call("game_stats")
+                if isinstance(data, dict):
+                    print(f"[GAME] {data.get('total_rooms', 0)} total rooms, "
+                          f"{data.get('active_rooms', 0)} active, "
+                          f"{data.get('total_players', 0)} players online")
+                    breakdown = data.get("room_breakdown", {})
+                    if breakdown:
+                        tier_info = ", ".join([f"{tier}: {count}" for tier, count in breakdown.items()])
+                        print(f"[TIERS] {tier_info}")
 
             # Emit WebSocket events
             elif root == "ws":
@@ -315,16 +461,6 @@ def main():
                         print("Usage: emote <emoji>")
                         continue
                     ws.emit("send_emote", {"emote": args[0]})
-                elif cmd == "jp":
-                    if not ws:
-                        print("[WARN] WS not connected")
-                        continue
-                    ws.emit("join_player", {"player_id": sess.player_id, "username": sess.username})
-                elif cmd == "jr":
-                    if not ws:
-                        print("[WARN] WS not connected")
-                        continue
-                    ws.emit("join_room", {"room_key": sess.room_key, "token": sess.room_token})
                 elif cmd == "e":
                     if len(args) < 2:
                         print("Usage: ws e <event> <json>")
