@@ -174,7 +174,12 @@ def main():
         if not raw:
             continue
         parts = raw.split()
-        root, cmd, args = parts[0], parts[1], parts[2:]
+        if len(parts) == 0:
+            continue
+        if len(parts) == 1:
+            root, cmd, args = parts[0], "", []
+        else:
+            root, cmd, args = parts[0], parts[1], parts[2:]
 
         try:
             if root in ("help", "?", "h"):
