@@ -1,7 +1,7 @@
 {
   "API_BASE": "http://localhost:8000/api/v1",
   "WS_URL": "http://localhost:8000",
-  "WS_NAMESPACE": "",
+  "WS_NAMESPACE": "/",
   "ENDPOINTS": {
     "health": {
       "method": "GET",
@@ -11,10 +11,6 @@
       "method": "POST",
       "path": "/players"
     },
-    "players_anonymous": {
-      "method": "GET",
-      "path": "/players/anonymous"
-    },
     "players_get": {
       "method": "GET",
       "path": "/players/{player_id}"
@@ -23,17 +19,17 @@
       "method": "GET",
       "path": "/players/username/{username}"
     },
-    "players_stats": {
-      "method": "GET",
-      "path": "/players/{player_id}/stats"
-    },
     "players_claim_reward": {
       "method": "POST",
       "path": "/players/{player_id}/claim-reward"
     },
-    "rooms_create": {
-      "method": "POST",
-      "path": "/rooms"
+    "players_stats": {
+      "method": "GET",
+      "path": "/players/{player_id}/stats"
+    },
+    "players_anonymous": {
+      "method": "GET",
+      "path": "/players/anonymous"
     },
     "rooms_list": {
       "method": "GET",
@@ -59,13 +55,17 @@
       "method": "POST",
       "path": "/rooms/skip"
     },
-    "leaderboard": {
+    "rooms_events": {
       "method": "GET",
-      "path": "/leaderboard"
+      "path": "/rooms/{room_key}/events"
     },
     "game_stats": {
       "method": "GET",
       "path": "/game/stats"
+    },
+    "leaderboard": {
+      "method": "GET",
+      "path": "/leaderboard"
     }
   }
 }
