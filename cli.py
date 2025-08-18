@@ -70,24 +70,24 @@ class REST:
         path_t = ep["path"]
         if path:
             for k, v in path.items():
-                path_t = path_t.replace("{%s}" % k, str(v))
+                path_t = path_t.replace(f"{{{k}}}", str(v))
         url = self.base + path_t
         m = ep["method"].upper()
         headers = headers or {}
-        print("\n[REST ->] %s %s" % (m, url))
+        print(f"\n[REST ->] {m} {url}")
         if params:
-            print("        params=%s" % json.dumps(params))
+            print(f"        params={json.dumps(params)}")
         if body is not None:
-            print("        body=%s" % json.dumps(body))
-        print("        headers=%s" % headers)
+            print(f"        body={json.dumps(body)}")
+        print(f"        headers={headers}")
         r = requests.request(m, url, params=params, json=body, headers=headers, timeout=30)
-        print("[REST <-] status=%s" % r.status_code)
+        print(f"[REST <-] status={r.status_code}")
         try:
             js = r.json()
-            print("[REST <-] json=%s" % json.dumps(js)[:1000])
+            print(f"[REST <-] json={json.dumps(js)[:1000]}")
             return js
         except Exception:
-            print("[REST <-] text=%s" % r.text[:500])
+            print(f"[REST <-] text={r.text[:500]}")
             return r.text
 
 
@@ -107,14 +107,14 @@ class WS:
 
         @self.sio.event(namespace=self.ns)
         def connect_error(data):
-            print("[WS] Connect error: %s" % data)
+            print(f"[WS] Connect error: {data}")
 
         @self.sio.on("*", namespace=self.ns)
         def catchall(event, data):
-            print("[WS <-] %s: %s" % (event, json.dumps(data, ensure_ascii=False)))
+            print(f"[WS <-] {event}: {json.dumps(data, ensure_ascii=False)}")
 
     def connect(self, headers=None):
-        print("[WS ->] connect %s ns=%s headers=%s" % (self.url, self.ns, headers))
+        print(f"[WS ->] connect {self.url} ns={self.ns} headers={headers}")
         self.sio.connect(self.url, namespaces=[self.ns], headers=headers, transports=["websocket", "polling"])
 
     def disconnect(self):
@@ -122,11 +122,11 @@ class WS:
         try:
             self.sio.disconnect()
         except Exception as e:
-            print("[WS] disconnect error: %s" % e)
+            print(f"[WS] disconnect error: {e}")
 
     def emit(self, event: str, data: Any = None):
         payload = {} if data is None else data
-        print("[WS ->] emit %s %s" % (event, payload))
+        print(f"[WS ->] emit {event} {payload}")
         self.sio.emit(event, payload, namespace=self.ns)
 
 
@@ -142,6 +142,7 @@ Rooms (HTTP):
   l                     GET /rooms
   jc                    POST /rooms/quick-join (casual)
   jo                    POST /rooms/quick-join (competitive)
+  jh                    POST /rooms/quick-join (high_stakes)
   jr <room_key>         POST /rooms/join (as player)
   cr <stake> <tier>     POST /rooms (create)
   obs <room_key>        POST /rooms/join as spectator
@@ -168,7 +169,7 @@ Meta:
 
 def main():
     cfg = load_cfg()
-    print("[BOOT] cfg: %s" % json.dumps(cfg, indent=2))
+    print(f"[BOOT] cfg: {json.dumps(cfg, indent=2)}")
     rest = REST(cfg["API_BASE"], cfg["ENDPOINTS"])
     ws = None
     sess = Session()
@@ -205,7 +206,7 @@ def main():
                 if isinstance(data, dict):
                     sess.player_id = data.get("player_id") or data.get("id")
                     sess.username = data.get("username") or uname
-                print("[STATE] player_id=%s username=%s" % (sess.player_id, sess.username))
+                print(f"[STATE] player_id={sess.player_id} username={sess.username}")
 
             elif cmd == "pu":
                 if not args:
@@ -218,7 +219,7 @@ def main():
                 if isinstance(data, dict):
                     sess.player_id = data.get("player_id") or data.get("id")
                     sess.username = data.get("username") or uname
-                print("[STATE] player_id=%s username=%s" % (sess.player_id, sess.username))
+                print(f"[STATE] player_id={sess.player_id} username={sess.username}")
 
             elif cmd == "me":
                 print(json.dumps({"player_id": sess.player_id, "username": sess.username, "room_key": sess.room_key},
@@ -232,13 +233,19 @@ def main():
                 if isinstance(data, dict):
                     sess.room_key = data.get("room_key") or data.get("id")
                     sess.room_token = data.get("room_token") or data.get("token")
-                    print("[STATE] room_key=%s room_token=%s" % (sess.room_key, sess.room_token))
+                    print(f"[STATE] room_key={sess.room_key} room_token={sess.room_token}")
             elif cmd == "jo":
                 data = rest.call("rooms_quick_join", body={"tier": "competitive", "as_spectator": False})
                 if isinstance(data, dict):
                     sess.room_key = data.get("room_key") or data.get("id")
                     sess.room_token = data.get("room_token") or data.get("token")
-                    print("[STATE] room_key=%s room_token=%s" % (sess.room_key, sess.room_token))
+                    print(f"[STATE] room_key={sess.room_key} room_token={sess.room_token}")
+            elif cmd == "jh":
+                data = rest.call("rooms_quick_join", body={"tier": "high_stakes", "as_spectator": False})
+                if isinstance(data, dict):
+                    sess.room_key = data.get("room_key") or data.get("id")
+                    sess.room_token = data.get("room_token") or data.get("token")
+                    print(f"[STATE] room_key={sess.room_key} room_token={sess.room_token}")
             elif cmd == "jr":
                 if not args:
                     print("Usage: jr <room_key>")
@@ -249,7 +256,7 @@ def main():
                 if isinstance(data, dict):
                     sess.room_key = rk
                     sess.room_token = data.get("room_token") or data.get("token")
-                    print("[STATE] joined room_key=%s room_token=%s" % (sess.room_key, sess.room_token))
+                    print(f"[STATE] joined room_key={sess.room_key} room_token={sess.room_token}")
             elif cmd == "cr":
                 if len(args) < 2:
                     print("Usage: cr <stake> <tier>")
@@ -365,9 +372,9 @@ def main():
                 print("Unknown command. Type 'help'.")
 
         except requests.RequestException as e:
-            print("[HTTP ERR] %s" % e)
+            print(f"[HTTP ERR] {e}")
         except Exception as e:
-            print("[ERR] %s: %s" % (type(e).__name__, e))
+            print(f"[ERR] {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
