@@ -41,6 +41,8 @@ DEFAULT_CFG = {
     }
 }
 
+EMOTE_LIST = ['❤️', '👍', '🔥', '⚡', '⭐', '😂', '🤔', '👀']
+
 
 def load_config():
     p = os.environ.get("CLI_CONFIG_JSON", "local_config.json")
@@ -531,10 +533,10 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 if not ws or not ws.connected:
                     print("[WARN] WS not connected")
                     return True
-                if not args:
-                    print("Usage: emote <emoji>")
+                if not args or args[0] >= len(EMOTE_LIST):
+                    print("Usage: emote <emoji_id>\nemoji list: " + ", ".join(EMOTE_LIST))
                     return True
-                await ws.emit_async("send_emote", {"emote": args[0]})
+                await ws.emit_async("send_emote", {"emote": EMOTE_LIST[args[0]]})
             elif cmd == "e":
                 if len(args) < 2:
                     print("Usage: ws e <event> <json>")
