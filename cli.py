@@ -397,7 +397,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                     if isinstance(data, dict):
                         sess.room_key = data["room_key"]
                         sess.room_token = data["room_token"]
-                        print(f"[STATE] Joined {tier} room: ...{sess.room_key[-5:] if sess.room_key else 'unknown'}")
+                        print(f"[STATE] Joining {tier} room: ...{sess.room_key[-5:] if sess.room_key else 'unknown'}")
                 else:
                     # Join specific room by key
                     room_key = subcmd
@@ -531,10 +531,12 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 if not ws or not ws.connected:
                     print("[WARN] WS not connected")
                     return True
-                if not args or args[0] >= len(EMOTE_LIST):
-                    print("Usage: emote <emoji_id>\nemoji list: " + ", ".join(EMOTE_LIST))
+                try:
+                    await ws.emit_async("send_emote", {"emote": EMOTE_LIST[args[0]]})
+                except TypeError:
+                    str_emote = ", ".join([f"{i}: {emote}" for i, emote in enumerate(EMOTE_LIST)])
+                    print(f"Usage: emote <emoji_id>\nemoji list: {str_emote}")
                     return True
-                await ws.emit_async("send_emote", {"emote": EMOTE_LIST[args[0]]})
             elif cmd == "e":
                 if len(args) < 2:
                     print("Usage: ws e <event> <json>")
