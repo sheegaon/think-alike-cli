@@ -27,6 +27,10 @@
       "method": "GET",
       "path": "/players/{player_id}/stats"
     },
+    "players_quests": {
+      "method": "GET",
+      "path": "/players/{player_id}/quests"
+    },
     "players_anonymous": {
       "method": "GET",
       "path": "/players/anonymous"

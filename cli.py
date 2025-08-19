@@ -26,6 +26,7 @@ DEFAULT_CFG = {
         "players_get": {"method": "GET", "path": "/players/{player_id}"},
         "players_by_username": {"method": "GET", "path": "/players/username/{username}"},
         "players_stats": {"method": "GET", "path": "/players/{player_id}/stats"},
+        "players_quests": {"method": "GET", "path": "/players/{player_id}/quests"},
         "players_claim_reward": {"method": "POST", "path": "/players/{player_id}/claim-reward"},
         "players_anonymous": {"method": "GET", "path": "/players/anonymous"},
         "rooms_list": {"method": "GET", "path": "/rooms"},
@@ -41,8 +42,8 @@ DEFAULT_CFG = {
 }
 
 
-def load_cfg():
-    p = os.environ.get("TA_CLI_CONFIG", "config.json")
+def load_config():
+    p = os.environ.get("CLI_CONFIG_JSON", "local_config.json")
     if os.path.exists(p):
         with open(p, "r") as f:
             user = json.load(f)
@@ -182,6 +183,7 @@ Player:
   p get [username]      Create or fetch named player (GET /players/username/<u> or POST /players) and emit join_player
   p me                  Print current session (player_id, username, room)
   p stats               GET /players/{player_id}/stats
+  p quests              View available quests and progress
   p claim <quest_id>    POST /players/{player_id}/claim-reward
   p anon [limit]        GET /players/anonymous
 
@@ -253,7 +255,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                     "room_key": sess.room_key
                 }, indent=2))
 
-            elif cmd == "stats" or cmd == "st":
+            elif cmd == "stats" or cmd == "s":
                 if not sess.player_id:
                     print("[WARN] No player selected. Use 'p get <username>' first.")
                     return True
@@ -263,7 +265,60 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                           f"Wins: {data.get('wins', 0)}, "
                           f"Win Rate: {data.get('win_rate', 0):.1f}%")
 
-            elif cmd == "claim" or cmd == "cl":
+            elif cmd == "anon" or cmd == "a":
+                limit = int(args[0]) if args and args[0].isdigit() else 20
+                params = {"limit": limit}
+                if sess.player_id:
+                    params["exclude_player_id"] = int(sess.player_id)
+                data = rest.call("players_anonymous", params=params)
+                if isinstance(data, list):
+                    print(f"[ANON] {len(data)} anonymous players:")
+                    for player in data[:10]:  # Show first 10
+                        print(f"  - {player['username']}: {player['rating']} rating, "
+                              f"{player['win_rate']}% win rate")
+
+            elif cmd == "quests" or cmd == "q":
+                if not sess.player_id:
+                    print("[WARN] No player selected. Use 'p get <username>' first.")
+                    return True
+                data = rest.call("players_quests", path={"player_id": sess.player_id})
+                if not isinstance(data, dict):
+                    return True
+                quests = data.get("quests", [])
+                claimable_count = data.get("claimable_count", 0)
+                total_coins = data.get("total_claimable_coins", 0)
+
+                print("[QUESTS] Available Quests & Progress:\n")
+
+                # Group quests by type
+                daily_quests = [q for q in quests if q["quest_type"] == "daily"]
+                seasonal_quests = [q for q in quests if q["quest_type"] == "seasonal"]
+
+                if daily_quests:
+                    print("🌅 DAILY QUESTS:")
+                    for quest in daily_quests:
+                        status = "✅ COMPLETE" if quest["completed"] else f"📊 {quest['progress']}/{quest['required']}"
+
+                        print(f"[QUESTS] {quest['name']} ({quest['quest_id']}):")
+                        print(f"\t{quest['description']} - {quest['reward']} coins\tStatus: {status}")
+                        print(f"    Status: {status}")
+                        if quest["claimable"]:
+                            print(f"    💰 Ready to claim! Use: p claim {quest['quest_id']}")
+
+                if seasonal_quests:
+                    print("🌟 SEASONAL QUESTS:")
+                    for quest in seasonal_quests:
+                        status = "✅ COMPLETE" if quest["completed"] else f"📊 {quest['progress']}/{quest['required']}"
+
+                        print(f"[QUESTS] {quest['name']} ({quest['quest_id']}):")
+                        print(f"\t{quest['description']} - {quest['reward']} coins\tStatus: {status}")
+                        if quest["claimable"]:
+                            print(f"    💰 Ready to claim! Use: p claim {quest['quest_id']}")
+
+                if claimable_count > 0:
+                    print(f"💰 Summary: {claimable_count} rewards ready to claim worth {total_coins} coins total!")
+
+            elif cmd == "claim" or cmd == "c":
                 if not args:
                     print("Usage: p claim <quest_id>")
                     return True
@@ -277,18 +332,6 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 if isinstance(data, dict) and data.get("success"):
                     print(f"[REWARD] Claimed {data.get('reward_amount', 0)} coins! "
                           f"New balance: {data.get('new_balance', 0)}")
-
-            elif cmd == "anon" or cmd == "a":
-                limit = int(args[0]) if args and args[0].isdigit() else 20
-                params = {"limit": limit}
-                if sess.player_id:
-                    params["exclude_player_id"] = int(sess.player_id)
-                data = rest.call("players_anonymous", params=params)
-                if isinstance(data, list):
-                    print(f"[ANON] {len(data)} anonymous players:")
-                    for player in data[:10]:  # Show first 10
-                        print(f"  - {player['username']}: {player['rating']} rating, "
-                              f"{player['win_rate']}% win rate")
 
         # REST API /rooms calls
         elif root[0] == "r":
@@ -519,7 +562,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
 
 async def main():
     """Main async CLI loop"""
-    cfg = load_cfg()
+    cfg = load_config()
     print(f"[BOOT] cfg: {json.dumps(cfg, indent=2)}")
     rest = REST(cfg["API_BASE"], cfg["ENDPOINTS"])
     sess = Session()
