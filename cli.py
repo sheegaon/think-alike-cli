@@ -59,7 +59,7 @@ def load_config():
 
 @dataclass
 class Session:
-    player_id: Optional[str] = None
+    player_id: Optional[int] = None
     username: Optional[str] = None
     room_key: Optional[str] = None
     room_token: Optional[str] = None
@@ -242,7 +242,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 if not (isinstance(data, dict) and ("player_id" in data or "id" in data)):
                     data = rest.call("players_create", body={"username": username})
                 if isinstance(data, dict):
-                    sess.player_id = str(data["id"]) if "id" in data else str(data["player_id"])
+                    sess.player_id = data["id"] if "id" in data else data["player_id"]
                     sess.username = data["username"]
                 print(f"[STATE] player_id={sess.player_id} username={sess.username}")
                 if not ws:
@@ -271,7 +271,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 limit = int(args[0]) if args and args[0].isdigit() else 20
                 params = {"limit": limit}
                 if sess.player_id:
-                    params["exclude_player_id"] = int(sess.player_id)
+                    params["exclude_player_id"] = sess.player_id
                 data = rest.call("players_anonymous", params=params)
                 if isinstance(data, list):
                     print(f"[ANON] {len(data)} anonymous players:")
@@ -330,7 +330,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 quest_id = args[0]
                 data = rest.call("players_claim_reward",
                                  path={"player_id": sess.player_id},
-                                 body={"quest_id": quest_id, "player_id": int(sess.player_id)})
+                                 body={"quest_id": quest_id, "player_id": sess.player_id})
                 if isinstance(data, dict) and data.get("success"):
                     print(f"[REWARD] Claimed {data.get('reward_amount', 0)} coins! "
                           f"New balance: {data.get('new_balance', 0)}")
@@ -393,7 +393,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                         print("[WARN] No player selected. Use 'p get <username>' first.")
                         return True
                     data = rest.call("rooms_quick_join",
-                                     body={"player_id": int(sess.player_id), "tier": tier, "as_spectator": False})
+                                     body={"player_id": sess.player_id, "tier": tier, "as_spectator": False})
                     if isinstance(data, dict):
                         sess.room_key = data["room_key"]
                         sess.room_token = data["room_token"]
@@ -405,8 +405,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                         print("[WARN] No player selected. Use 'p get <username>' first.")
                         return True
                     data = rest.call("rooms_join",
-                                     body={"room_key": room_key, "player_id": int(sess.player_id),
-                                           "username": sess.username, "balance": 1000, "as_spectator": False})
+                                     body={"room_key": room_key, "player_id": sess.player_id, "as_spectator": False})
                     if isinstance(data, dict) and data.get("success"):
                         sess.room_key = room_key
                         sess.room_token = data["room_token"]
@@ -426,8 +425,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                     print("[WARN] No player selected. Use 'p get <username>' first.")
                     return True
                 data = rest.call("rooms_join",
-                                 body={"room_key": room_key, "player_id": int(sess.player_id),
-                                       "username": sess.username, "balance": 1000, "as_spectator": True})
+                                 body={"room_key": room_key, "player_id": sess.player_id, "as_spectator": True})
                 if isinstance(data, dict) and data.get("success"):
                     sess.room_key = room_key
                     sess.room_token = data["room_token"]
@@ -439,7 +437,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                     return True
                 at_round_end = "immediate" not in args
                 data = rest.call("rooms_leave",
-                                 body={"room_key": sess.room_key, "player_id": int(sess.player_id),
+                                 body={"room_key": sess.room_key, "player_id": sess.player_id,
                                        "at_round_end": at_round_end})
                 if isinstance(data, dict) and data.get("success"):
                     action = "scheduled leave" if data.get("scheduled") else "left"
@@ -456,7 +454,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 if not sess.room_key:
                     print("[WARN] Not in a room")
                     return True
-                data = rest.call("rooms_skip", body={"room_key": sess.room_key, "player_id": int(sess.player_id)})
+                data = rest.call("rooms_skip", body={"room_key": sess.room_key, "player_id": sess.player_id})
                 if isinstance(data, dict) and data.get("success"):
                     print("[STATE] Scheduled to skip next round")
 
@@ -467,7 +465,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 if args[0].isdigit():
                     params["limit"] = int(args[0])
                 if sess.player_id:
-                    params["current_player_id"] = int(sess.player_id)
+                    params["current_player_id"] = sess.player_id
             data = rest.call("leaderboard", params=params)
             if isinstance(data, dict):
                 leaderboard = data.get("leaderboard", [])
