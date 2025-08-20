@@ -31,15 +31,11 @@
       "method": "GET",
       "path": "/players/{player_id}/quests"
     },
-    "players_anonymous": {
-      "method": "GET",
-      "path": "/players/anonymous"
-    },
     "rooms_list": {
       "method": "GET",
       "path": "/rooms"
     },
-    "rooms_get": {
+    "rooms_details": {
       "method": "GET",
       "path": "/rooms/{room_key}"
     },

@@ -16,6 +16,41 @@ from typing import Any, Dict, Optional
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 
+HELP = """
+Home:
+  help                    Show this help
+  quit                    Exit
+
+Player:
+  p get [username]        Create or fetch named player (GET /players/username/<u> or POST /players) and emit join_player
+  p me                    Print current session (player_id, username, room)
+  p stats                 GET /players/{player_id}/stats
+  p quests                View available quests and progress
+  p claim <quest_id>      POST /players/{player_id}/claim-reward
+
+Rooms:
+  r list [tier]           GET /rooms (optionally filter by tier)
+  r details <room_key>    GET /rooms/{room_key}
+  r events [limit]        GET /rooms/{room_key}/events
+  r join c|o|h|<key>      POST /rooms/quick-join or /rooms/join and emit join_room
+  r obs <room_key>        POST /rooms/join as spectator
+  r leave [immediate]     POST /rooms/leave and emit leave_room
+  r skip                  POST /rooms/skip
+
+Meta:
+  lb [limit]              GET /leaderboard
+  stats                   GET /game/stats
+
+Round (WebSocket):
+  ws on                   Connect WS
+  ws off                  Disconnect WS
+  ws commit <idx>         emit commit
+  ws reveal               emit reveal
+  ws queue on|off         spectator_queue
+  ws emote <emoji>        send_emote
+  ws event <event> <json> emit arbitrary WS event
+"""
+
 DEFAULT_CFG = {
     "API_BASE": "http://localhost:8000/api/v1",
     "WS_URL": "http://localhost:8000",
@@ -28,9 +63,8 @@ DEFAULT_CFG = {
         "players_stats": {"method": "GET", "path": "/players/{player_id}/stats"},
         "players_quests": {"method": "GET", "path": "/players/{player_id}/quests"},
         "players_claim_reward": {"method": "POST", "path": "/players/{player_id}/claim-reward"},
-        "players_anonymous": {"method": "GET", "path": "/players/anonymous"},
         "rooms_list": {"method": "GET", "path": "/rooms"},
-        "rooms_get": {"method": "GET", "path": "/rooms/{room_key}"},
+        "rooms_details": {"method": "GET", "path": "/rooms/{room_key}"},
         "rooms_join": {"method": "POST", "path": "/rooms/join"},
         "rooms_quick_join": {"method": "POST", "path": "/rooms/quick-join"},
         "rooms_leave": {"method": "POST", "path": "/rooms/leave"},
@@ -44,21 +78,8 @@ DEFAULT_CFG = {
 EMOTE_LIST = ['❤️', '👍', '🔥', '⚡', '⭐', '😂', '🤔', '👀']
 
 
-def load_config():
-    p = os.environ.get("CLI_CONFIG_JSON", "local_config.json")
-    if os.path.exists(p):
-        with open(p, "r") as f:
-            user = json.load(f)
-        merged = DEFAULT_CFG.copy()
-        merged.update(user)
-        if "ENDPOINTS" in user:
-            merged["ENDPOINTS"] = {**DEFAULT_CFG["ENDPOINTS"], **user["ENDPOINTS"]}
-        return merged
-    return DEFAULT_CFG
-
-
 @dataclass
-class Session:
+class UserContext:
     player_id: Optional[int] = None
     username: Optional[str] = None
     room_key: Optional[str] = None
@@ -106,12 +127,12 @@ class REST:
 class AsyncWS:
     """Async Socket.IO client wrapper"""
 
-    def __init__(self, url: str, namespace: str = "", sess: Optional[Session] = None):
+    def __init__(self, url: str, namespace: str = "", user: Optional[UserContext] = None):
         self.sio = socketio.AsyncClient(logger=False, engineio_logger=False, reconnection=True)
         self.url = url
         self.ns = namespace if namespace else "/"
         self.connected = False
-        self.sess = sess
+        self.sess = user
 
         @self.sio.event(namespace=self.ns)
         async def connect():
@@ -177,45 +198,9 @@ class AsyncWS:
             print("[WS] Not connected - cannot emit")
 
 
-HELP = """
-Home:
-  help                  Show this help
-  quit                  Exit
-
-Player:
-  p get [username]      Create or fetch named player (GET /players/username/<u> or POST /players) and emit join_player
-  p me                  Print current session (player_id, username, room)
-  p stats               GET /players/{player_id}/stats
-  p quests              View available quests and progress
-  p claim <quest_id>    POST /players/{player_id}/claim-reward
-  p anon [limit]        GET /players/anonymous
-
-Rooms:
-  r list [tier]         GET /rooms (optionally filter by tier)
-  r get <room_key>      GET /rooms/{room_key}
-  r events [limit]      GET /rooms/{room_key}/events
-  r join c|o|h|<key>    POST /rooms/quick-join or /rooms/join and emit join_room
-  r obs <room_key>      POST /rooms/join as spectator
-  r leave [immediate]   POST /rooms/leave and emit leave_room
-  r skip                POST /rooms/skip
-
-Meta:
-  lb [limit]            GET /leaderboard
-  stats                 GET /game/stats
-
-Round (WebSocket):
-  ws on                 Connect WS
-  ws off                Disconnect WS
-  ws commit <idx>       emit commit
-  ws reveal             emit reveal
-  ws queue on|off       spectator_queue
-  ws emote <emoji>      send_emote
-  ws e <event> <json>   emit arbitrary WS event
-"""
-
-
-async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[AsyncWS], sess: Session):
+async def process_command(raw_cmd: str, rest: REST, ws: Optional[AsyncWS], user: UserContext):
     """Process a single command asynchronously"""
+    cmd_parts = raw_cmd.strip().split()
     if len(cmd_parts) == 0:
         return True
 
@@ -228,13 +213,13 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
         if root in ("help", "?", "h"):
             print(HELP)
 
-        elif root[0] == 'q':
+        elif root in ('q', 'quit', 'exit', 'bye'):
             print("[BOOT] Bye.")
             return False  # Signal to quit
 
         # REST API /players calls and WebSocket join_player
-        elif root[0] == "p":
-            if cmd == "get" or cmd == "g":
+        elif root in ('player', 'p'):
+            if cmd in ('get', 'g'):
                 if not args:
                     print("Usage: p get <username>")
                     return True
@@ -243,48 +228,36 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 if not (isinstance(data, dict) and ("player_id" in data or "id" in data)):
                     data = rest.call("players_create", body={"username": username})
                 if isinstance(data, dict):
-                    sess.player_id = data["id"] if "id" in data else data["player_id"]
-                    sess.username = data["username"]
-                print(f"[STATE] player_id={sess.player_id} username={sess.username}")
+                    user.player_id = data["id"] if "id" in data else data["player_id"]
+                    user.username = data["username"]
+                print(f"[STATE] player_id={user.player_id} username={user.username}")
                 if not ws:
                     print("[WARN] WS not connected")
                     return True
-                await ws.emit_async("join_player", {"player_id": sess.player_id, "username": sess.username})
+                await ws.emit_async("join_player", {"player_id": user.player_id, "username": user.username})
 
             elif cmd == "me":
                 print(json.dumps({
-                    "player_id": sess.player_id,
-                    "username": sess.username,
-                    "room_key": sess.room_key
+                    "player_id": user.player_id,
+                    "username": user.username,
+                    "room_key": user.room_key
                 }, indent=2))
 
-            elif cmd == "stats" or cmd == "s":
-                if not sess.player_id:
+            elif cmd in ('stats', 's'):
+                if not user.player_id:
                     print("[WARN] No player selected. Use 'p get <username>' first.")
                     return True
-                data = rest.call("players_stats", path={"player_id": sess.player_id})
+                data = rest.call("players_stats", path={"player_id": user.player_id})
                 if isinstance(data, dict):
                     print(f"[STATS] Games: {data.get('games_played', 0)}, "
                           f"Wins: {data.get('wins', 0)}, "
                           f"Win Rate: {data.get('win_rate', 0):.1f}%")
 
-            elif cmd == "anon" or cmd == "a":
-                limit = int(args[0]) if args and args[0].isdigit() else 20
-                params = {"limit": limit}
-                if sess.player_id:
-                    params["exclude_player_id"] = sess.player_id
-                data = rest.call("players_anonymous", params=params)
-                if isinstance(data, list):
-                    print(f"[ANON] {len(data)} anonymous players:")
-                    for player in data[:10]:  # Show first 10
-                        print(f"  - {player['username']}: {player['rating']} rating, "
-                              f"{player['win_rate']}% win rate")
-
-            elif cmd == "quests" or cmd == "q":
-                if not sess.player_id:
+            elif cmd in ('quests', 'q'):
+                if not user.player_id:
                     print("[WARN] No player selected. Use 'p get <username>' first.")
                     return True
-                data = rest.call("players_quests", path={"player_id": sess.player_id})
+                data = rest.call("players_quests", path={"player_id": user.player_id})
                 if not isinstance(data, dict):
                     return True
                 quests = data.get("quests", [])
@@ -321,24 +294,24 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 if claimable_count > 0:
                     print(f"💰 Summary: {claimable_count} rewards ready to claim worth {total_coins} coins total!")
 
-            elif cmd == "claim" or cmd == "c":
+            elif cmd in ('claim', 'c'):
                 if not args:
                     print("Usage: p claim <quest_id>")
                     return True
-                if not sess.player_id:
+                if not user.player_id:
                     print("[WARN] No player selected. Use 'p get <username>' first.")
                     return True
                 quest_id = args[0]
                 data = rest.call("players_claim_reward",
-                                 path={"player_id": sess.player_id},
-                                 body={"quest_id": quest_id, "player_id": sess.player_id})
+                                 path={"player_id": user.player_id},
+                                 body={"quest_id": quest_id, "player_id": user.player_id})
                 if isinstance(data, dict) and data.get("success"):
                     print(f"[REWARD] Claimed {data.get('reward_amount', 0)} coins! "
                           f"New balance: {data.get('new_balance', 0)}")
 
         # REST API /rooms calls
-        elif root[0] == "r":
-            if cmd == "list" or cmd == "l":
+        elif root in ('room', 'r'):
+            if cmd in ('list', 'l'):
                 params = {}
                 if args and args[0] in ["casual", "competitive", "high_stakes"]:
                     params["tier"] = args[0]
@@ -354,12 +327,12 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                                         f"{room['stake']} stake, {room['state']}"
                             print(f"  - ...{room['room_key'][-5:]} ({room_info})")
 
-            elif cmd == "get" or cmd == "g":
+            elif cmd in ('details', 'd'):
                 if not args:
-                    print("Usage: r get <room_key>")
+                    print("Usage: room details <room_key>")
                     return True
                 room_key = args[0]
-                data = rest.call("rooms_get", path={"room_key": room_key})
+                data = rest.call("rooms_details", path={"room_key": room_key})
                 if isinstance(data, dict):
                     print(f"[ROOM] Tier: {data['tier']}, Players: {data['player_count']}/{data['max_players']}, "
                           f"Stake: {data['stake']}, State: {data['state']}")
@@ -368,12 +341,12 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                         print(f"[ROUND] Active: {round_info['adjective']} + {len(round_info['nouns'])} nouns, "
                               f"Phase: {round_info['phase']}")
 
-            elif cmd == "events" or cmd == "ev":
-                if not sess.room_key:
+            elif cmd == "events":
+                if not user.room_key:
                     print("[WARN] Not in a room")
                     return True
                 params = {"limit": int(args[0])} if args and args[0].isdigit() else {"limit": 20}
-                data = rest.call("rooms_events", path={"room_key": sess.room_key}, params=params)
+                data = rest.call("rooms_events", path={"room_key": user.room_key}, params=params)
                 if isinstance(data, dict):
                     events = data.get("events", [])
                     print(f"[EVENTS] {len(events)} recent events:")
@@ -381,92 +354,92 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                         timestamp = event["timestamp"][:19]  # Remove microseconds
                         print(f"  - {timestamp}: {event['event_type']} - {event.get('details', {})}")
 
-            elif cmd == "join" or cmd == "j":
+            elif cmd in ('join', 'j'):
                 if not args:
-                    print("Usage: r join c|o|h|<room_key>")
+                    print("Usage: room join c|o|h|<room_key>")
                     return True
                 subcmd = args[0]
                 if subcmd in ["c", "o", "h"]:
                     # Quick join by tier
                     tier_map = {"c": "casual", "o": "competitive", "h": "high_stakes"}
                     tier = tier_map[subcmd]
-                    if not sess.player_id:
+                    if not user.player_id:
                         print("[WARN] No player selected. Use 'p get <username>' first.")
                         return True
                     data = rest.call("rooms_quick_join",
-                                     body={"player_id": sess.player_id, "tier": tier, "as_spectator": False})
+                                     body={"player_id": user.player_id, "tier": tier, "as_spectator": False})
                     if isinstance(data, dict):
-                        sess.room_key = data["room_key"]
-                        sess.room_token = data["room_token"]
-                        print(f"[STATE] Joining {tier} room: ...{sess.room_key[-5:] if sess.room_key else 'unknown'}")
+                        user.room_key = data["room_key"]
+                        user.room_token = data["room_token"]
+                        print(f"[STATE] Joining {tier} room: ...{user.room_key[-5:] if user.room_key else 'unknown'}")
                 else:
                     # Join specific room by key
                     room_key = subcmd
-                    if not sess.player_id:
+                    if not user.player_id:
                         print("[WARN] No player selected. Use 'p get <username>' first.")
                         return True
                     data = rest.call("rooms_join",
-                                     body={"room_key": room_key, "player_id": sess.player_id, "as_spectator": False})
+                                     body={"room_key": room_key, "player_id": user.player_id, "as_spectator": False})
                     if isinstance(data, dict) and data.get("success"):
-                        sess.room_key = room_key
-                        sess.room_token = data["room_token"]
-                        print(f"[STATE] Joined room: ...{sess.room_key[-5:]}")
-                if sess.room_token:
+                        user.room_key = room_key
+                        user.room_token = data["room_token"]
+                        print(f"[STATE] Joined room: ...{user.room_key[-5:]}")
+                if user.room_token:
                     if not ws:
                         print("[WARN] WS not connected")
                         return True
-                    await ws.emit_async("join_room", {"room_token": sess.room_token})
+                    await ws.emit_async("join_room", {"room_token": user.room_token})
 
-            elif cmd == "obs" or cmd == "o":
+            elif cmd in ('observe', 'obs', 'o'):
                 if not args:
-                    print("Usage: r obs <room_key>")
+                    print("Usage: room observe <room_key>")
                     return True
                 room_key = args[0]
-                if not sess.player_id:
+                if not user.player_id:
                     print("[WARN] No player selected. Use 'p get <username>' first.")
                     return True
                 data = rest.call("rooms_join",
-                                 body={"room_key": room_key, "player_id": sess.player_id, "as_spectator": True})
+                                 body={"room_key": room_key, "player_id": user.player_id, "as_spectator": True})
                 if isinstance(data, dict) and data.get("success"):
-                    sess.room_key = room_key
-                    sess.room_token = data["room_token"]
-                    print(f"[STATE] Observing room: ...{sess.room_key[-5:]}")
+                    user.room_key = room_key
+                    user.room_token = data["room_token"]
+                    print(f"[STATE] Observing room: ...{user.room_key[-5:]}")
 
             elif cmd == "leave":
-                if not sess.room_key:
+                if not user.room_key:
                     print("[WARN] Not in a room")
                     return True
                 at_round_end = "immediate" not in args
                 data = rest.call("rooms_leave",
-                                 body={"room_key": sess.room_key, "player_id": sess.player_id,
+                                 body={"room_key": user.room_key, "player_id": user.player_id,
                                        "at_round_end": at_round_end})
                 if isinstance(data, dict) and data.get("success"):
                     action = "scheduled leave" if data.get("scheduled") else "left"
-                    print(f"[STATE] {action} from room: ...{sess.room_key[-5:]}")
+                    print(f"[STATE] {action} from room: ...{user.room_key[-5:]}")
                     if not data.get("scheduled"):
-                        sess.room_key = None
-                        sess.room_token = None
+                        user.room_key = None
+                        user.room_token = None
                 if not ws:
                     print("[WARN] WS not connected")
                     return True
                 await ws.emit_async("leave_room")
 
             elif cmd == "skip":
-                if not sess.room_key:
+                if not user.room_key:
                     print("[WARN] Not in a room")
                     return True
-                data = rest.call("rooms_skip", body={"room_key": sess.room_key, "player_id": sess.player_id})
+                data = rest.call("rooms_skip", body={"room_key": user.room_key, "player_id": user.player_id})
                 if isinstance(data, dict) and data.get("success"):
                     print("[STATE] Scheduled to skip next round")
 
         # Meta HTTP calls
-        elif root == "lb":
+        elif root in ('leaderboard', 'lb'):
             params = {}
             if args:
                 if args[0].isdigit():
                     params["limit"] = int(args[0])
-                if sess.player_id:
-                    params["current_player_id"] = sess.player_id
+                if user.player_id:
+                    params["current_player_id"] = user.player_id
             data = rest.call("leaderboard", params=params)
             if isinstance(data, dict):
                 leaderboard = data.get("leaderboard", [])
@@ -489,7 +462,7 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                     print(f"[TIERS] {tier_info}")
 
         # Emit WebSocket events
-        elif root == "ws":
+        elif root in ('websocket', 'ws'):
             if not cmd:
                 print("Usage: ws <subcommand> [args]")
                 return True
@@ -509,9 +482,9 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                 if not ws or not ws.connected:
                     print("[WARN] WS not connected")
                     return True
-                sess.choice = int(args[0])
-                sess.nonce = secrets.token_hex(16)
-                payload = f"{sess.player_id}{sess.round_key}{sess.choice}{sess.nonce}".encode("utf-8")
+                user.choice = int(args[0])
+                user.nonce = secrets.token_hex(16)
+                payload = f"{user.player_id}{user.round_key}{user.choice}{user.nonce}".encode("utf-8")
                 commit_hash = hashlib.sha256(payload).hexdigest()
                 await ws.emit_async("commit", {"hash": commit_hash})
             elif cmd == "reveal":
@@ -538,9 +511,9 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                     str_emote = ", ".join([f"{i}: {emote}" for i, emote in enumerate(EMOTE_LIST)])
                     print(f"Usage: emote <emoji_id>\nemoji list: {str_emote}")
                     return True
-            elif cmd == "e":
+            elif cmd == "event":
                 if len(args) < 2:
-                    print("Usage: ws e <event> <json>")
+                    print("Usage: ws event <event> <json>")
                     return True
                 ev = args[0]
                 payload = " ".join(args[1:])
@@ -563,13 +536,26 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
     return True  # Continue running
 
 
+def load_config():
+    p = os.environ.get("CLI_CONFIG_JSON", "local_config.json")
+    if os.path.exists(p):
+        with open(p, "r") as f:
+            user = json.load(f)
+        merged = DEFAULT_CFG.copy()
+        merged.update(user)
+        if "ENDPOINTS" in user:
+            merged["ENDPOINTS"] = {**DEFAULT_CFG["ENDPOINTS"], **user["ENDPOINTS"]}
+        return merged
+    return DEFAULT_CFG
+
+
 async def main():
     """Main async CLI loop"""
     cfg = load_config()
     print(f"[BOOT] cfg: {json.dumps(cfg, indent=2)}")
     rest = REST(cfg["API_BASE"], cfg["ENDPOINTS"])
-    sess = Session()
-    ws = AsyncWS(cfg["WS_URL"], cfg["WS_NAMESPACE"], sess=sess)
+    user = UserContext()
+    ws = AsyncWS(cfg["WS_URL"], cfg["WS_NAMESPACE"], user=user)
 
     print("\n===== Think Alike CLI =====")
     print("Quick-start: 'p get <username>' create or fetch player, "
@@ -593,8 +579,7 @@ async def main():
                 if not raw.strip():
                     continue
 
-                parts = raw.strip().split()
-                should_continue = await process_command(parts, cfg, rest, ws, sess)
+                should_continue = await process_command(raw, rest, ws, user)
 
                 if not should_continue:
                     break
