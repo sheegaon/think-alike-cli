@@ -63,7 +63,7 @@ class Session:
     username: Optional[str] = None
     room_key: Optional[str] = None
     room_token: Optional[str] = None
-    round_id: Optional[str] = None
+    round_key: Optional[str] = None
     choice: Optional[int] = None
     nonce: Optional[str] = None
     last_http: Dict[str, Any] = field(default_factory=dict)
@@ -132,7 +132,7 @@ class AsyncWS:
             print(f"[WS <-] deal: {json.dumps(data, ensure_ascii=False)}")
             # Save deal info to session for later commit
             if self.sess and isinstance(data, dict):
-                self.sess.round_id = data.get("round_id")
+                self.sess.round_key = data["round_key"]
                 self.sess.choice = None
                 self.sess.nonce = None
 
@@ -140,10 +140,11 @@ class AsyncWS:
         async def on_request_reveal(data):
             print(f"[WS <-] request_reveal: {json.dumps(data, ensure_ascii=False)}")
             # Auto-reveal
-            if (self.sess and self.sess.player_id and self.sess.round_id and self.sess.choice is not None and
+            if (self.sess and self.sess.player_id and self.sess.round_key and self.sess.choice is not None and
                     self.sess.nonce):
                 await asyncio.sleep(1)
-                await self.emit_async("reveal", {"choice": self.sess.choice, "nonce": self.sess.nonce})
+                await self.emit_async(
+                    "reveal", {"choice": self.sess.choice, "nonce": self.sess.nonce, "round_key": self.sess.round_key})
 
         @self.sio.on("*", namespace=self.ns)
         async def catchall(event, data):
@@ -510,8 +511,8 @@ async def process_command(cmd_parts: list, cfg: dict, rest: REST, ws: Optional[A
                     return True
                 sess.choice = int(args[0])
                 sess.nonce = secrets.token_hex(16)
-                payload = f"{sess.player_id}{sess.round_id}{sess.choice}{sess.nonce}"
-                commit_hash = hashlib.sha256(payload.encode()).hexdigest()
+                payload = f"{sess.player_id}{sess.round_key}{sess.choice}{sess.nonce}".encode("utf-8")
+                commit_hash = hashlib.sha256(payload).hexdigest()
                 await ws.emit_async("commit", {"hash": commit_hash})
             elif cmd == "reveal":
                 if not ws or not ws.connected:
