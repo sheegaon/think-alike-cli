@@ -552,7 +552,7 @@ async def process_command(raw_cmd: str, rest: REST, ws: Optional[AsyncWS], user:
                     print("[WARN] WS not connected")
                     return True
                 try:
-                    await ws.emit_async("send_emote", {"emote": EMOTE_LIST[args[0]]})
+                    await ws.emit_async("send_emote", {"emote": EMOTE_LIST[int(args[0])]})
                 except TypeError:
                     str_emote = ", ".join([f"{i}: {emote}" for i, emote in enumerate(EMOTE_LIST)])
                     print(f"Usage: emote <emoji_id>\nemoji list: {str_emote}")
