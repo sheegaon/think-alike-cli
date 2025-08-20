@@ -12,7 +12,7 @@ import socketio
 import secrets
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -87,6 +87,8 @@ class UserContext:
     round_key: Optional[str] = None
     choice: Optional[int] = None
     nonce: Optional[str] = None
+    adjective: Optional[str] = None
+    nouns: Optional[List[str]] = None
     last_http: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -132,7 +134,7 @@ class AsyncWS:
         self.url = url
         self.ns = namespace if namespace else "/"
         self.connected = False
-        self.sess = user
+        self.user = user
 
         @self.sio.event(namespace=self.ns)
         async def connect():
@@ -151,21 +153,27 @@ class AsyncWS:
         @self.sio.on("deal", namespace=self.ns)
         async def on_deal(data):
             print(f"[WS <-] deal: {json.dumps(data, ensure_ascii=False)}")
-            # Save deal info to session for later commit
-            if self.sess and isinstance(data, dict):
-                self.sess.round_key = data["round_key"]
-                self.sess.choice = None
-                self.sess.nonce = None
+            # Save deal info to user context for later commit
+            if self.user and isinstance(data, dict):
+                self.user.round_key = data["round_key"]
+                self.user.choice = None
+                self.user.nonce = None
+                self.user.adjective = data.get("adjective")
+                self.user.nouns = data.get("nouns")
 
         @self.sio.on("request_reveal", namespace=self.ns)
         async def on_request_reveal(data):
             print(f"[WS <-] request_reveal: {json.dumps(data, ensure_ascii=False)}")
+            # Clear previous deal info
+            self.user.adjective = None
+            self.user.nouns = None
+
             # Auto-reveal
-            if (self.sess and self.sess.player_id and self.sess.round_key and self.sess.choice is not None and
-                    self.sess.nonce):
+            if (self.user and self.user.player_id and self.user.round_key and self.user.choice is not None and
+                    self.user.nonce):
                 await asyncio.sleep(1)
                 await self.emit_async(
-                    "reveal", {"choice": self.sess.choice, "nonce": self.sess.nonce, "round_key": self.sess.round_key})
+                    "reveal", {"choice": self.user.choice, "nonce": self.user.nonce, "round_key": self.user.round_key})
 
         @self.sio.on("*", namespace=self.ns)
         async def catchall(event, data):
@@ -358,33 +366,32 @@ async def process_command(raw_cmd: str, rest: REST, ws: Optional[AsyncWS], user:
                 if not args:
                     print("Usage: room join c|o|h|<room_key>")
                     return True
+
+                if not user.player_id:
+                    print("[WARN] No player selected. Use 'p get <username>' first.")
+                    return True
+
                 subcmd = args[0]
                 if subcmd in ["c", "o", "h"]:
                     # Quick join by tier
                     tier_map = {"c": "casual", "o": "competitive", "h": "high_stakes"}
                     tier = tier_map[subcmd]
-                    if not user.player_id:
-                        print("[WARN] No player selected. Use 'p get <username>' first.")
-                        return True
                     data = rest.call("rooms_quick_join",
                                      body={"player_id": user.player_id, "tier": tier, "as_spectator": False})
-                    if isinstance(data, dict):
-                        user.room_key = data["room_key"]
-                        user.room_token = data["room_token"]
-                        print(f"[STATE] Joining {tier} room: ...{user.room_key[-5:] if user.room_key else 'unknown'}")
+                elif subcmd in ["casual", "competitive", "high_stakes"]:
+                    tier = subcmd
+                    data = rest.call("rooms_quick_join",
+                                     body={"player_id": user.player_id, "tier": tier, "as_spectator": False})
                 else:
                     # Join specific room by key
                     room_key = subcmd
-                    if not user.player_id:
-                        print("[WARN] No player selected. Use 'p get <username>' first.")
-                        return True
                     data = rest.call("rooms_join",
                                      body={"room_key": room_key, "player_id": user.player_id, "as_spectator": False})
-                    if isinstance(data, dict) and data.get("success"):
-                        user.room_key = room_key
-                        user.room_token = data["room_token"]
-                        print(f"[STATE] Joined room: ...{user.room_key[-5:]}")
-                if user.room_token:
+                    tier = data.get("tier", "unknown")
+                if isinstance(data, dict):
+                    user.room_key = data["room_key"]
+                    user.room_token = data["room_token"]
+                    print(f"[STATE] Joining {tier} room: ...{user.room_key[-5:] if user.room_key else 'unknown'}")
                     if not ws:
                         print("[WARN] WS not connected")
                         return True
