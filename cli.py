@@ -85,10 +85,13 @@ class UserContext:
     room_key: Optional[str] = None
     room_token: Optional[str] = None
     round_key: Optional[str] = None
+    round_phase: Optional[str] = None
     choice: Optional[int] = None
     nonce: Optional[str] = None
     adjective: Optional[str] = None
     nouns: Optional[List[str]] = None
+    balance: Optional[int] = None
+    next_round_info: Optional[Dict[str, Any]] = None
     last_http: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -160,6 +163,7 @@ class AsyncWS:
                 self.user.nonce = None
                 self.user.adjective = data.get("adjective")
                 self.user.nouns = data.get("nouns")
+                self.user.round_phase = "deal"
 
         @self.sio.on("request_reveal", namespace=self.ns)
         async def on_request_reveal(data):
@@ -174,6 +178,34 @@ class AsyncWS:
                 await asyncio.sleep(1)
                 await self.emit_async(
                     "reveal", {"choice": self.user.choice, "nonce": self.user.nonce, "round_key": self.user.round_key})
+
+        @self.sio.on("round_results", namespace=self.ns)
+        async def on_round_results(data):
+            print(f"[WS <-] round_results: {json.dumps(data, ensure_ascii=False)}")
+            if self.user and isinstance(data, dict):
+                self.user.balance = data.get("new_balance", self.user.balance)
+                print(f"[STATE] New balance: {self.user.balance}")
+            self.user.round_phase = "results"
+
+        @self.sio.on("next_round_info", namespace=self.ns)
+        async def on_next_round_info(data):
+            print(f"[WS <-] next_round_info: {json.dumps(data, ensure_ascii=False)}")
+            self.user.round_phase = "waiting"
+            self.user.next_round_info = data
+
+        @self.sio.on("removed_from_room", namespace=self.ns)
+        async def on_removed_from_room(data):
+            print(f"[WS <-] removed_from_room: {json.dumps(data, ensure_ascii=False)}")
+            if self.user:
+                self.user.room_key = None
+                self.user.room_token = None
+                self.user.round_key = None
+                self.user.round_phase = None
+                self.user.choice = None
+                self.user.nonce = None
+                self.user.adjective = None
+                self.user.nouns = None
+                self.user.next_round_info = None
 
         @self.sio.on("*", namespace=self.ns)
         async def catchall(event, data):
@@ -238,7 +270,8 @@ async def process_command(raw_cmd: str, rest: REST, ws: Optional[AsyncWS], user:
                 if isinstance(data, dict):
                     user.player_id = data["id"] if "id" in data else data["player_id"]
                     user.username = data["username"]
-                print(f"[STATE] player_id={user.player_id} username={user.username}")
+                    user.balance = data["balance"]
+                print(f"[STATE] {user.player_id=} {user.username=} {user.balance=}")
                 if not ws:
                     print("[WARN] WS not connected")
                     return True
@@ -248,7 +281,12 @@ async def process_command(raw_cmd: str, rest: REST, ws: Optional[AsyncWS], user:
                 print(json.dumps({
                     "player_id": user.player_id,
                     "username": user.username,
-                    "room_key": user.room_key
+                    "balance": user.balance,
+                    "room_key": user.room_key,
+                    "room_token": user.room_token,
+                    "round_key": user.round_key,
+                    "round_phase": user.round_phase,
+                    "next_round_info": user.next_round_info,
                 }, indent=2))
 
             elif cmd in ('stats', 's'):
@@ -491,6 +529,7 @@ async def process_command(raw_cmd: str, rest: REST, ws: Optional[AsyncWS], user:
                     return True
                 user.choice = int(args[0])
                 user.nonce = secrets.token_hex(16)
+                user.round_phase = "committed"
                 payload = f"{user.player_id}{user.round_key}{user.choice}{user.nonce}".encode("utf-8")
                 commit_hash = hashlib.sha256(payload).hexdigest()
                 await ws.emit_async("commit", {"hash": commit_hash})
