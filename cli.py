@@ -11,6 +11,7 @@ import requests
 import socketio
 import secrets
 import hashlib
+import traceback
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from prompt_toolkit import PromptSession
@@ -218,7 +219,7 @@ class AsyncWS:
             await self.sio.connect(self.url, namespaces=[self.ns], headers=headers,
                                    transports=["websocket", "polling"])
         except Exception as e:
-            print(f"[WS] Connection failed: {e}")
+            print(f"[WS] Connection failed: {e}\n{traceback.format_exc()}")
 
     async def disconnect_async(self):
         """Disconnect from websocket server"""
