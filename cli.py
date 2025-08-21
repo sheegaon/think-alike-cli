@@ -446,7 +446,7 @@ async def process_command(raw_cmd: str, rest: REST, ws: Optional[AsyncWS], user:
                     return True
                 data = rest.call("rooms_join",
                                  body={"room_key": room_key, "player_id": user.player_id, "as_spectator": True})
-                if isinstance(data, dict) and data.get("success"):
+                if isinstance(data, dict) and int(data.get("err_code")) == 1:
                     user.room_key = room_key
                     user.room_token = data["room_token"]
                     print(f"[STATE] Observing room: ...{user.room_key[-5:]}")
