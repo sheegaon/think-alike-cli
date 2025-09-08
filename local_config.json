@@ -5,7 +5,7 @@
   "ENDPOINTS": {
     "health": {
       "method": "GET",
-      "path": "/health"
+      "path": "/game/health"
     },
     "players_create": {
       "method": "POST",
@@ -65,7 +65,7 @@
     },
     "leaderboard": {
       "method": "GET",
-      "path": "/leaderboard"
+      "path": "/game/leaderboard"
     }
   }
 }
