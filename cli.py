@@ -57,7 +57,7 @@ DEFAULT_CFG = {
     "WS_URL": "http://localhost:8000",
     "WS_NAMESPACE": "/",
     "ENDPOINTS": {
-        "health": {"method": "GET", "path": "/health"},
+        "health": {"method": "GET", "path": "/game/health"},
         "players_create": {"method": "POST", "path": "/players"},
         "players_get": {"method": "GET", "path": "/players/{player_id}"},
         "players_by_username": {"method": "GET", "path": "/players/username/{username}"},
@@ -71,7 +71,7 @@ DEFAULT_CFG = {
         "rooms_leave": {"method": "POST", "path": "/rooms/leave"},
         "rooms_skip": {"method": "POST", "path": "/rooms/skip"},
         "rooms_events": {"method": "GET", "path": "/rooms/{room_key}/events"},
-        "leaderboard": {"method": "GET", "path": "/leaderboard"},
+        "leaderboard": {"method": "GET", "path": "/game/leaderboard"},
         "game_stats": {"method": "GET", "path": "/game/stats"}
     }
 }
