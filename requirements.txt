@@ -4,3 +4,4 @@ python-dateutil>=2.8.2
 aiohttp>=3.12.15
 requests>=2.32.4
 prompt_toolkit>=3.0
+nicegui>=1.4.22
