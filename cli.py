@@ -49,15 +49,26 @@ Meta:
   stats                   GET /game/stats
 
 Gameplay (REST):
-  commit <idx>            POST /gameplay/commit (with hash)
-  reveal                  POST /gameplay/reveal
-  emote <emoji_id>        POST /gameplay/emote
-  queue on|off            POST /gameplay/spectator-queue
+  gp key                  POST /gameplay/commit-key (fetch round token)
+  gp commit <idx>         POST /gameplay/commit (hash + submit)
+  gp reveal               POST /gameplay/reveal (submit choice)
+  gp emote <emoji_id>     POST /gameplay/emote
+  gp queue on|off         POST /gameplay/spectator-queue
 
 Polling:
   poll on                 Start event polling
   poll off                Stop event polling
   poll once               Poll events once
+"""
+
+GAMEPLAY_HELP = """
+Gameplay commands (gp):
+  gp key                  Fetch and cache the commit key for the round
+  gp commit <idx>         Hash selection + submit commit
+  gp reveal               Reveal your selection
+  gp emote <emoji_id>     Send an emote to the room
+  gp queue on|off         Join or leave the spectator queue
+  gp status               Show cached round tokens + commit state
 """
 
 DEFAULT_CFG = {
@@ -85,11 +96,81 @@ DEFAULT_CFG = {
         "rooms_status": {"method": "GET", "path": "/rooms/{room_key}/status"},
         "leaderboard": {"method": "GET", "path": "/game/leaderboard"},
         "game_stats": {"method": "GET", "path": "/game/stats"},
-        "gameplay_commit_key": {"method": "POST", "path": "/gameplay/commit-key"},
-        "gameplay_commit": {"method": "POST", "path": "/gameplay/commit"},
-        "gameplay_reveal": {"method": "POST", "path": "/gameplay/reveal"},
-        "gameplay_emote": {"method": "POST", "path": "/gameplay/emote"},
-        "gameplay_spectator_queue": {"method": "POST", "path": "/gameplay/spectator-queue"},
+        "gameplay_commit_key": {
+            "method": "POST",
+            "path": "/gameplay/commit-key",
+            "request": {
+                "room_key": "string",
+                "player_id": "integer"
+            },
+            "response": {
+                "round_id": "string",
+                "round_key": "string",
+                "round_token": "string",
+                "expires_at": "datetime"
+            }
+        },
+        "gameplay_commit": {
+            "method": "POST",
+            "path": "/gameplay/commit",
+            "request": {
+                "room_key": "string",
+                "player_id": "integer",
+                "commit_hash": "string",
+                "round_token": "string?"
+            },
+            "response": {
+                "round_id": "string",
+                "commit_token": "string",
+                "round_token": "string",
+                "commit_hash": "string"
+            }
+        },
+        "gameplay_reveal": {
+            "method": "POST",
+            "path": "/gameplay/reveal",
+            "request": {
+                "room_key": "string",
+                "player_id": "integer",
+                "choice": "integer",
+                "nonce": "string",
+                "round_key": "string",
+                "round_token": "string?",
+                "commit_token": "string?"
+            },
+            "response": {
+                "round_id": "string",
+                "round_token": "string",
+                "reveal_token": "string",
+                "status": "string"
+            }
+        },
+        "gameplay_emote": {
+            "method": "POST",
+            "path": "/gameplay/emote",
+            "request": {
+                "room_key": "string",
+                "player_id": "integer",
+                "emote": "string"
+            },
+            "response": {
+                "emote": "string",
+                "sent_at": "datetime"
+            }
+        },
+        "gameplay_spectator_queue": {
+            "method": "POST",
+            "path": "/gameplay/spectator-queue",
+            "request": {
+                "room_key": "string",
+                "player_id": "integer",
+                "want_to_join": "boolean"
+            },
+            "response": {
+                "want_to_join": "boolean",
+                "queued": "boolean"
+            }
+        },
         "admin_balance": {"method": "POST", "path": "/admin/balance"},
     },
     "EVENT_POLL_INTERVAL": 2.0,
@@ -112,6 +193,11 @@ class RoundContext:
     nouns: Optional[List[str]] = None
     choice: Optional[int] = None
     nonce: Optional[str] = None
+    round_token: Optional[str] = None
+    commit_token: Optional[str] = None
+    reveal_token: Optional[str] = None
+    commit_hash: Optional[str] = None
+    key_expires_at: Optional[str] = None
 
 
 @dataclass
@@ -127,6 +213,7 @@ class UserContext:
     last_event_id: Optional[int] = None
     last_heartbeat: Optional[datetime] = None
     last_status_poll: Optional[datetime] = None
+    spectator_queue_opt_in: bool = False
 
     # Round-specific state
     round: RoundContext = field(default_factory=RoundContext)
@@ -192,6 +279,51 @@ def reset_room_tracking(user: UserContext) -> None:
     """Reset polling-related room tracking state."""
     user.last_event_id = None
     user.last_status_poll = None
+
+
+def cache_round_artifacts(user: UserContext, payload: Dict[str, Any]) -> None:
+    """Persist any round/gameplay metadata returned by REST calls."""
+    if not isinstance(payload, dict):
+        return
+
+    rc = user.round
+    field_map = {
+        "round_id": "round_id",
+        "round_key": "round_key",
+        "round_token": "round_token",
+        "commit_token": "commit_token",
+        "reveal_token": "reveal_token",
+        "nonce": "nonce",
+        "choice": "choice",
+        "round_phase": "round_phase",
+        "commit_hash": "commit_hash",
+        "key_expires_at": "key_expires_at",
+        "expires_at": "key_expires_at",
+    }
+
+    for source, attr in field_map.items():
+        if source in payload and payload[source] is not None:
+            setattr(rc, attr, payload[source])
+
+    if "balance" in payload and isinstance(payload["balance"], int):
+        user.balance = payload["balance"]
+
+    if "has_committed" in payload:
+        user.has_committed = bool(payload["has_committed"])
+
+    if "has_revealed" in payload:
+        user.has_revealed = bool(payload["has_revealed"])
+
+
+def ensure_player_and_room(user: UserContext, action: str) -> bool:
+    """Validate player and room state before performing gameplay actions."""
+    if not user.player_id:
+        print(f"[ERROR] No player selected. Use 'p get <username>' before '{action}'.")
+        return False
+    if not user.room_key:
+        print(f"[ERROR] Not in a room. Join a room before '{action}'.")
+        return False
+    return True
 
 
 def process_room_event(event: Dict[str, Any], user: UserContext) -> None:
@@ -352,25 +484,237 @@ async def stop_polling(user: UserContext) -> None:
     print("[POLL] Stopped background polling")
 
 
-async def fetch_commit_key(rest: REST, user: UserContext) -> bool:
+async def fetch_commit_key(rest: REST, user: UserContext, *, silent: bool = False) -> Optional[Dict[str, Any]]:
     """Fetch the per-round encryption key needed for commits."""
     if not user.player_id or not user.room_key:
-        return False
+        return None
 
-    data, err = rest.call(
-        "gameplay_commit_key",
-        body={"room_key": user.room_key, "player_id": user.player_id}
-    )
+    payload = {"room_key": user.room_key, "player_id": user.player_id}
+    data, err = rest.call("gameplay_commit_key", body=payload)
     if err:
         print(f"[COMMIT] Failed to fetch commit key: {err}")
-        return False
+        return None
 
-    if isinstance(data, dict) and "round_key" in data:
-        user.round.round_key = data["round_key"]
-        return True
+    if isinstance(data, dict):
+        user.last_http["gameplay_commit_key"] = data
+        cache_round_artifacts(user, data)
 
-    return False
+        if not silent:
+            round_id = user.round.round_id or data.get("round_id")
+            token_hint = None
+            if user.round.round_token:
+                token_hint = f"…{user.round.round_token[-6:]}" if len(user.round.round_token) > 6 else user.round.round_token
+            key_hint = None
+            if user.round.round_key:
+                key_hint = f"…{user.round.round_key[-6:]}" if len(user.round.round_key) > 6 else user.round.round_key
+            print("[COMMIT] Round key cached" +
+                  (f" (round_id={round_id})" if round_id else "") +
+                  (f", key={key_hint}" if key_hint else "") +
+                  (f", token={token_hint}" if token_hint else ""))
 
+        return data
+
+    print("[COMMIT] Unexpected commit key response")
+    return None
+
+
+async def handle_gameplay_command(action: str, args: List[str], rest: REST, user: UserContext) -> None:
+    """Handle gameplay-related REST commands under the gp namespace."""
+    action = (action or "").lower()
+
+    if action in ("", "help", "?"):
+        print(GAMEPLAY_HELP)
+        return
+
+    if action in ("key", "k"):
+        if not ensure_player_and_room(user, "gp key"):
+            return
+        await fetch_commit_key(rest, user)
+        return
+
+    if action in ("commit", "c"):
+        if not ensure_player_and_room(user, "gp commit"):
+            return
+        if not args or not args[0].isdigit():
+            print("Usage: gp commit <noun_index>")
+            return
+
+        if user.round.round_phase and user.round.round_phase not in ("SELECT", None):
+            print(f"[ERROR] Cannot commit in phase: {user.round.round_phase}")
+            return
+        if user.has_committed:
+            print("[ERROR] Already committed")
+            return
+
+        choice = int(args[0])
+        total_nouns = len(user.round.nouns or [])
+        if total_nouns == 0:
+            print("[ERROR] Round nouns not available yet from the server")
+            return
+        if choice < 0 or choice >= total_nouns:
+            print(f"[ERROR] Invalid choice. Available indices: 0-{total_nouns - 1}")
+            return
+
+        if not user.round.round_key:
+            data = await fetch_commit_key(rest, user, silent=True)
+            if data is None or not user.round.round_key:
+                print("[ERROR] Failed to cache commit key for this round")
+                return
+
+        user.round.choice = choice
+        user.round.nonce = secrets.token_hex(16)
+        payload = f"{user.player_id}{user.round.round_key}{user.round.choice}{user.round.nonce}"
+        commit_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        user.round.commit_hash = commit_hash
+
+        body: Dict[str, Any] = {
+            "room_key": user.room_key,
+            "player_id": user.player_id,
+            "commit_hash": commit_hash,
+        }
+        if user.round.round_token:
+            body["round_token"] = user.round.round_token
+        if user.round.round_id:
+            body["round_id"] = user.round.round_id
+
+        data, err = rest.call("gameplay_commit", body=body)
+        if err:
+            print(f"[ERROR] Commit failed: {err}")
+            return
+
+        user.last_http["gameplay_commit"] = data
+        if isinstance(data, dict):
+            cache_round_artifacts(user, data)
+
+        user.has_committed = True
+        noun = user.round.nouns[choice] if user.round.nouns and choice < len(user.round.nouns) else choice
+        print(f"[COMMIT] Submitted choice {choice} ({noun}) with hash {commit_hash[:12]}…")
+        return
+
+    if action in ("reveal", "r"):
+        if not ensure_player_and_room(user, "gp reveal"):
+            return
+        if user.round.round_phase and user.round.round_phase not in ("REVEAL", None):
+            print(f"[ERROR] Cannot reveal in phase: {user.round.round_phase}")
+            return
+        if user.has_revealed:
+            print("[ERROR] Already revealed")
+            return
+        if user.round.choice is None or not user.round.nonce or not user.round.round_key:
+            print("[ERROR] Missing reveal data - did you commit first?")
+            return
+
+        body: Dict[str, Any] = {
+            "room_key": user.room_key,
+            "player_id": user.player_id,
+            "choice": user.round.choice,
+            "nonce": user.round.nonce,
+            "round_key": user.round.round_key,
+        }
+        if user.round.round_token:
+            body["round_token"] = user.round.round_token
+        if user.round.commit_token:
+            body["commit_token"] = user.round.commit_token
+        if user.round.round_id:
+            body["round_id"] = user.round.round_id
+
+        data, err = rest.call("gameplay_reveal", body=body)
+        if err:
+            print(f"[ERROR] Reveal failed: {err}")
+            return
+
+        user.last_http["gameplay_reveal"] = data
+        if isinstance(data, dict):
+            cache_round_artifacts(user, data)
+
+        user.has_revealed = True
+        print("[REVEAL] Reveal submitted successfully")
+        return
+
+    if action in ("emote", "e"):
+        if not ensure_player_and_room(user, "gp emote"):
+            return
+        if not args or not args[0].isdigit():
+            emote_str = ", ".join([f"{i}: {emote}" for i, emote in enumerate(EMOTE_LIST)])
+            print(f"Usage: gp emote <emoji_id>\nAvailable: {emote_str}")
+            return
+
+        emote_id = int(args[0])
+        if emote_id < 0 or emote_id >= len(EMOTE_LIST):
+            print(f"[ERROR] Invalid emote ID. Max: {len(EMOTE_LIST) - 1}")
+            return
+
+        body = {
+            "room_key": user.room_key,
+            "player_id": user.player_id,
+            "emote": EMOTE_LIST[emote_id],
+        }
+        data, err = rest.call("gameplay_emote", body=body)
+        if err:
+            print(f"[ERROR] Emote failed: {err}")
+            return
+
+        user.last_http["gameplay_emote"] = data
+        if isinstance(data, dict):
+            cache_round_artifacts(user, data)
+        print(f"[EMOTE] Sent: {EMOTE_LIST[emote_id]}")
+        return
+
+    if action in ("queue", "q"):
+        if not ensure_player_and_room(user, "gp queue"):
+            return
+        if not args:
+            print("Usage: gp queue on|off")
+            return
+
+        want = args[0].lower() in ("on", "true", "yes", "1")
+        body = {
+            "room_key": user.room_key,
+            "player_id": user.player_id,
+            "want_to_join": want,
+        }
+        if user.round.round_id:
+            body["round_id"] = user.round.round_id
+
+        data, err = rest.call("gameplay_spectator_queue", body=body)
+        if err:
+            print(f"[ERROR] Queue toggle failed: {err}")
+            return
+
+        user.last_http["gameplay_spectator_queue"] = data
+        if isinstance(data, dict):
+            cache_round_artifacts(user, data)
+            user.spectator_queue_opt_in = bool(data.get("want_to_join", want))
+            queued = data.get("queued")
+        else:
+            user.spectator_queue_opt_in = want
+            queued = None
+
+        action_str = "joined" if user.spectator_queue_opt_in else "left"
+        extra = f" (queued={queued})" if queued is not None else ""
+        print(f"[QUEUE] {action_str} spectator queue{extra}")
+        return
+
+    if action in ("status", "s"):
+        rc = user.round
+        summary = {
+            "round_id": rc.round_id,
+            "phase": rc.round_phase,
+            "choice": rc.choice,
+            "nonce": rc.nonce,
+            "round_token": rc.round_token,
+            "commit_token": rc.commit_token,
+            "reveal_token": rc.reveal_token,
+            "commit_hash": rc.commit_hash,
+            "key_expires_at": rc.key_expires_at,
+            "has_committed": user.has_committed,
+            "has_revealed": user.has_revealed,
+            "spectator_queue": user.spectator_queue_opt_in,
+        }
+        print(json.dumps(summary, indent=2))
+        return
+
+    print(f"[ERROR] Unknown gameplay command: {action}")
 
 async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict[str, Any]):
     """Process a single command."""
@@ -680,129 +1024,24 @@ async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict
                       f"{data.get('total_players', 0)} players online")
 
         # Gameplay commands
+        elif root in ("gp", "gameplay"):
+            await handle_gameplay_command(cmd, args, rest, user)
+
         elif root == "commit":
-            if not args or not args[0].isdigit():
-                print("Usage: commit <noun_index>")
-                return True
-            if not user.player_id or not user.room_key:
-                print("[ERROR] Not in a room or no player selected")
-                return True
-            if user.round.round_phase != "SELECT":
-                print(f"[ERROR] Cannot commit in phase: {user.round.round_phase}")
-                return True
-            if user.has_committed:
-                print("[ERROR] Already committed")
-                return True
-
-            choice = int(args[0])
-            if not user.round.nouns or choice >= len(user.round.nouns):
-                print(f"[ERROR] Invalid choice. Available: 0-{len(user.round.nouns or []) - 1}")
-                return True
-
-            # Fetch commit key if needed
-            if not user.round.round_key:
-                if not await fetch_commit_key(rest, user):
-                    print("[ERROR] Failed to get commit key")
-                    return True
-
-            user.round.choice = choice
-            user.round.nonce = secrets.token_hex(16)
-            
-            # Create commit hash
-            payload = f"{user.player_id}{user.round.round_key}{user.round.choice}{user.round.nonce}"
-            commit_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-            data, err = rest.call(
-                "gameplay_commit",
-                body={
-                    "room_key": user.room_key,
-                    "player_id": user.player_id,
-                    "commit_hash": commit_hash,
-                },
-            )
-            if err:
-                print(f"[ERROR] Commit failed: {err}")
-            else:
-                print(f"[COMMIT] Committed choice {choice}: {user.round.nouns[choice]}")
+            commit_args = [cmd] + args if cmd else list(args)
+            await handle_gameplay_command("commit", commit_args, rest, user)
 
         elif root == "reveal":
-            if not user.player_id or not user.room_key:
-                print("[ERROR] Not in a room or no player selected")
-                return True
-            if user.round.round_phase != "REVEAL":
-                print(f"[ERROR] Cannot reveal in phase: {user.round.round_phase}")
-                return True
-            if user.has_revealed:
-                print("[ERROR] Already revealed")
-                return True
-            if user.round.choice is None or not user.round.nonce or not user.round.round_key:
-                print("[ERROR] Missing reveal data - did you commit first?")
-                return True
-
-            data, err = rest.call(
-                "gameplay_reveal",
-                body={
-                    "room_key": user.room_key,
-                    "player_id": user.player_id,
-                    "choice": user.round.choice,
-                    "nonce": user.round.nonce,
-                    "round_key": user.round.round_key,
-                },
-            )
-            if err:
-                print(f"[ERROR] Reveal failed: {err}")
-            else:
-                print("[REVEAL] Revealed successfully")
+            reveal_args = [cmd] + args if cmd else list(args)
+            await handle_gameplay_command("reveal", reveal_args, rest, user)
 
         elif root == "emote":
-            if not args or not args[0].isdigit():
-                emote_str = ", ".join([f"{i}: {emote}" for i, emote in enumerate(EMOTE_LIST)])
-                print(f"Usage: emote <emoji_id>\nAvailable: {emote_str}")
-                return True
-            if not user.player_id or not user.room_key:
-                print("[ERROR] Not in a room or no player selected")
-                return True
-
-            emote_id = int(args[0])
-            if emote_id >= len(EMOTE_LIST):
-                print(f"[ERROR] Invalid emote ID. Max: {len(EMOTE_LIST) - 1}")
-                return True
-
-            data, err = rest.call(
-                "gameplay_emote",
-                body={
-                    "room_key": user.room_key,
-                    "player_id": user.player_id,
-                    "emote": EMOTE_LIST[emote_id],
-                },
-            )
-            if err:
-                print(f"[ERROR] Emote failed: {err}")
-            else:
-                print(f"[EMOTE] Sent: {EMOTE_LIST[emote_id]}")
+            emote_args = [cmd] + args if cmd else list(args)
+            await handle_gameplay_command("emote", emote_args, rest, user)
 
         elif root == "queue":
-            if not args:
-                print("Usage: queue on|off")
-                return True
-            if not user.player_id or not user.room_key:
-                print("[ERROR] Not in a room or no player selected")
-                return True
-
-            want = args[0].lower() == "on"
-            data, err = rest.call(
-                "gameplay_spectator_queue",
-                body={
-                    "room_key": user.room_key,
-                    "player_id": user.player_id,
-                    "want_to_join": want,
-                },
-            )
-            if err:
-                print(f"[ERROR] Queue failed: {err}")
-            else:
-                action = "joined" if want else "left"
-                print(f"[QUEUE] {action} spectator queue")
+            queue_args = [cmd] + args if cmd else list(args)
+            await handle_gameplay_command("queue", queue_args, rest, user)
 
         # Polling commands
         elif root == "poll":
