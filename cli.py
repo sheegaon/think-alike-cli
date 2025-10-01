@@ -389,10 +389,14 @@ async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict
                     print("Usage: p get <username>")
                     return True
                 username = args[0]
+                def is_invalid_player_data(data, err):
+                    return err or not isinstance(data, dict) or "id" not in data
+
+                username = args[0]
                 data, err = rest.call("players_by_username", path={"username": username})
-                if err or not isinstance(data, dict) or "id" not in data:
+                if is_invalid_player_data(data, err):
                     data, err = rest.call("players_create", body={"username": username})
-                    if err or not isinstance(data, dict) or "id" not in data:
+                    if is_invalid_player_data(data, err):
                         print(f"[ERROR] Failed to create player: {err}")
                         return True
                 
