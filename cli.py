@@ -30,8 +30,8 @@ Player:
   p stats                 GET /players/{player_id}/stats
   p quests                View available quests and progress
   p claim <quest_id>      POST /players/{player_id}/claim-reward
-  p wallet [limit]        View wallet and recent transactions
-  p heartbeat             Send presence heartbeat
+  p presence [read]       POST (default) or GET /players/{player_id}/presence
+  p wallet [limit]        GET /players/{player_id}/wallet
 
 Rooms:
   r list [tier]           GET /rooms (optionally filter by tier)
@@ -72,8 +72,8 @@ DEFAULT_CFG = {
         "players_quests": {"method": "GET", "path": "/players/{player_id}/quests"},
         "players_claim_reward": {"method": "POST", "path": "/players/{player_id}/claim-reward"},
         "players_wallet": {"method": "GET", "path": "/players/{player_id}/wallet"},
-        "player_heartbeat": {"method": "POST", "path": "/players/{player_id}/presence"},
-        "player_presence": {"method": "GET", "path": "/players/{player_id}/presence"},
+        "players_presence_post": {"method": "POST", "path": "/players/{player_id}/presence"},
+        "players_presence_get": {"method": "GET", "path": "/players/{player_id}/presence"},
         "rooms_list": {"method": "GET", "path": "/rooms"},
         "rooms_summary": {"method": "GET", "path": "/rooms/summary"},
         "rooms_details": {"method": "GET", "path": "/rooms/{room_key}"},
@@ -100,6 +100,18 @@ DEFAULT_CFG = {
 }
 
 EMOTE_LIST = ['👍', '😂', '😮', '😡', '🎉', '🤔', '❤️']
+
+
+def parse_iso_datetime(value: Any) -> Optional[datetime]:
+    """Parse an ISO8601 timestamp into a timezone-aware datetime."""
+    if not isinstance(value, str):
+        return None
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -241,19 +253,24 @@ def process_room_event(event: Dict[str, Any], user: UserContext) -> None:
             reset_round_state(user)
 
 
-async def maybe_send_heartbeat(rest: REST, user: UserContext, cfg: Dict[str, Any]) -> None:
-    """Send heartbeat if needed."""
+async def maybe_send_heartbeat(rest: REST, user: UserContext, cfg: Dict[str, Any]) -> Optional[datetime]:
+    """Send heartbeat if needed, returning the latest timestamp."""
     if user.player_id is None:
-        return
+        return None
     interval = float(cfg.get("HEARTBEAT_INTERVAL", 10.0))
     now = datetime.now(timezone.utc)
     if user.last_heartbeat and (now - user.last_heartbeat).total_seconds() < interval:
-        return
-    _, err = rest.call("player_heartbeat", path={"player_id": user.player_id})
+        return user.last_heartbeat
+    data, err = rest.call("players_presence_post", path={"player_id": user.player_id})
     if err:
         print(f"[HEARTBEAT] Failed: {err}")
-    else:
-        user.last_heartbeat = now
+        return None
+
+    server_ts = None
+    if isinstance(data, dict):
+        server_ts = parse_iso_datetime(data.get("last_seen_at"))
+    user.last_heartbeat = server_ts or now
+    return user.last_heartbeat
 
 
 async def poll_events_once(rest: REST, user: UserContext, cfg: Dict[str, Any]) -> bool:
@@ -264,7 +281,7 @@ async def poll_events_once(rest: REST, user: UserContext, cfg: Dict[str, Any]) -
     def _is_not_found(err: Optional[str]) -> bool:
         return bool(err and ("not found" in err.lower() or "404" in err))
 
-    await maybe_send_heartbeat(rest, user, cfg)
+    _ = await maybe_send_heartbeat(rest, user, cfg)
 
     # Poll events
     params: Dict[str, Any] = {"limit": int(cfg.get("EVENT_POLL_LIMIT", 50))}
@@ -420,6 +437,7 @@ async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict
                     "player_id": user.player_id,
                     "username": user.username,
                     "balance": user.balance,
+                    "last_heartbeat": user.last_heartbeat.isoformat() if user.last_heartbeat else None,
                     "room_key": f"...{user.room_key[-5:]}" if user.room_key else None,
                     "round_phase": user.round.round_phase,
                     "has_committed": user.has_committed,
@@ -474,6 +492,25 @@ async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict
                     print(f"[REWARD] Claimed {data.get('reward_amount', 0)} coins! "
                           f"New balance: {data.get('new_balance', 0)}")
 
+            elif cmd == "presence":
+                if not user.player_id:
+                    print("[ERROR] No player selected. Use 'p get <username>' first.")
+                    return True
+                action = args[0].lower() if args else "send"
+                if action in ("read", "get", "view", "last"):
+                    data, err = rest.call("players_presence_get", path={"player_id": user.player_id})
+                    if err:
+                        print(f"[ERROR] {err}")
+                    elif isinstance(data, dict):
+                        server_ts = parse_iso_datetime(data.get("last_seen_at"))
+                        if server_ts:
+                            user.last_heartbeat = server_ts
+                        print(json.dumps(data, indent=2))
+                else:
+                    ts = await maybe_send_heartbeat(rest, user, cfg)
+                    if ts:
+                        print(f"[HEARTBEAT] Last seen at {ts.isoformat()}")
+
             elif cmd == "wallet":
                 if not user.player_id:
                     print("[ERROR] No player selected. Use 'p get <username>' first.")
@@ -483,6 +520,12 @@ async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict
                 if err:
                     print(f"[ERROR] {err}")
                 elif isinstance(data, dict):
+                    balance = data.get('balance')
+                    try:
+                        if balance is not None:
+                            user.balance = int(balance)
+                    except (TypeError, ValueError):
+                        pass
                     print(f"[WALLET] Balance: {data.get('balance', 0)}")
                     transactions = data.get("transactions", [])
                     for tx in transactions[:5]:
@@ -493,7 +536,9 @@ async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict
                 if not user.player_id:
                     print("[ERROR] No player selected. Use 'p get <username>' first.")
                     return True
-                await maybe_send_heartbeat(rest, user, cfg)
+                ts = await maybe_send_heartbeat(rest, user, cfg)
+                if ts:
+                    print(f"[HEARTBEAT] Last seen at {ts.isoformat()}")
 
         # Room commands
         elif root in ('room', 'r'):
