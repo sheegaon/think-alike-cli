@@ -539,7 +539,7 @@ async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict
                 elif isinstance(data, dict):
                     events = data.get("events", [])
                     print(f"[EVENTS] {len(events)} recent events:")
-                    for event in events[-10:]:  # Show last 10
+                    for event in events:  # Show all fetched events
                         timestamp = event["timestamp"][:19]
                         print(f"  {timestamp}: {event['event_type']} - {event.get('details', {})}")
 
