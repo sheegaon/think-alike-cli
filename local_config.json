@@ -1,7 +1,5 @@
 {
   "API_BASE": "http://localhost:8000/api/v1",
-  "WS_URL": "http://localhost:8000",
-  "WS_NAMESPACE": "/",
   "ENDPOINTS": {
     "health": {
       "method": "GET",
@@ -19,9 +17,9 @@
       "method": "GET",
       "path": "/players/username/{username}"
     },
-    "players_claim_reward": {
-      "method": "POST",
-      "path": "/players/{player_id}/claim-reward"
+    "players_settings": {
+      "method": "PATCH",
+      "path": "/players/{player_id}/settings"
     },
     "players_stats": {
       "method": "GET",
@@ -31,9 +29,29 @@
       "method": "GET",
       "path": "/players/{player_id}/quests"
     },
+    "players_claim_reward": {
+      "method": "POST",
+      "path": "/players/{player_id}/claim-reward"
+    },
+    "players_wallet": {
+      "method": "GET",
+      "path": "/players/{player_id}/wallet"
+    },
+    "player_heartbeat": {
+      "method": "POST",
+      "path": "/players/{player_id}/presence"
+    },
+    "player_presence": {
+      "method": "GET",
+      "path": "/players/{player_id}/presence"
+    },
     "rooms_list": {
       "method": "GET",
       "path": "/rooms"
+    },
+    "rooms_summary": {
+      "method": "GET",
+      "path": "/rooms/summary"
     },
     "rooms_details": {
       "method": "GET",
@@ -59,13 +77,46 @@
       "method": "GET",
       "path": "/rooms/{room_key}/events"
     },
-    "game_stats": {
+    "rooms_status": {
       "method": "GET",
-      "path": "/game/stats"
+      "path": "/rooms/{room_key}/status"
     },
     "leaderboard": {
       "method": "GET",
       "path": "/game/leaderboard"
+    },
+    "game_stats": {
+      "method": "GET",
+      "path": "/game/stats"
+    },
+    "gameplay_commit_key": {
+      "method": "POST",
+      "path": "/gameplay/commit-key"
+    },
+    "gameplay_commit": {
+      "method": "POST",
+      "path": "/gameplay/commit"
+    },
+    "gameplay_reveal": {
+      "method": "POST",
+      "path": "/gameplay/reveal"
+    },
+    "gameplay_emote": {
+      "method": "POST",
+      "path": "/gameplay/emote"
+    },
+    "gameplay_spectator_queue": {
+      "method": "POST",
+      "path": "/gameplay/spectator-queue"
+    },
+    "admin_balance": {
+      "method": "POST",
+      "path": "/admin/balance"
     }
-  }
+  },
+  "EVENT_POLL_INTERVAL": 2.0,
+  "STATUS_POLL_INTERVAL": 5.0,
+  "HEARTBEAT_INTERVAL": 10.0,
+  "EVENT_POLL_LIMIT": 50,
+  "INITIAL_EVENT_LIMIT": 100
 }
