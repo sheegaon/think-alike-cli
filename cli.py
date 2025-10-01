@@ -188,6 +188,12 @@ def reset_round_state(user: UserContext) -> None:
     user.has_revealed = False
 
 
+def reset_room_tracking(user: UserContext) -> None:
+    """Reset polling-related room tracking state."""
+    user.last_event_id = None
+    user.last_status_poll = None
+
+
 def process_room_event(event: Dict[str, Any], user: UserContext) -> None:
     """Process a single room event to update user state."""
     event_type = event.get("event_type")
@@ -231,6 +237,7 @@ def process_room_event(event: Dict[str, Any], user: UserContext) -> None:
             print("[ROOM] You were removed from the room")
             user.room_key = None
             user.room_token = None
+            reset_room_tracking(user)
             reset_round_state(user)
 
 
@@ -254,6 +261,9 @@ async def poll_events_once(rest: REST, user: UserContext, cfg: Dict[str, Any]) -
     if not user.room_key:
         return False
 
+    def _is_not_found(err: Optional[str]) -> bool:
+        return bool(err and ("not found" in err.lower() or "404" in err))
+
     await maybe_send_heartbeat(rest, user, cfg)
 
     # Poll events
@@ -264,7 +274,7 @@ async def poll_events_once(rest: REST, user: UserContext, cfg: Dict[str, Any]) -
     data, err = rest.call("rooms_events", path={"room_key": user.room_key}, params=params)
     if err:
         print(f"[POLL] Event poll failed: {err}")
-        if "not found" in err.lower() or "404" in err:
+        if _is_not_found(err):
             return False
         return True
 
@@ -283,7 +293,7 @@ async def poll_events_once(rest: REST, user: UserContext, cfg: Dict[str, Any]) -
         status_data, status_err = rest.call("rooms_status", path={"room_key": user.room_key})
         if status_err:
             print(f"[POLL] Status poll failed: {status_err}")
-            if "not found" in status_err.lower() or "404" in status_err:
+            if _is_not_found(status_err):
                 return False
         elif isinstance(status_data, dict):
             user.player_count = status_data.get("player_count", user.player_count)
@@ -585,6 +595,7 @@ async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict
                     user.room_key = data["room_key"]
                     user.room_token = data.get("room_token")
                     user.balance = data.get("new_balance", user.balance)
+                    reset_room_tracking(user)
                     reset_round_state(user)
                     print(f"[ROOM] Joined room: ...{user.room_key[-5:] if user.room_key else 'unknown'}")
                     # Auto-start polling
@@ -605,6 +616,7 @@ async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict
                 elif isinstance(data, dict):
                     user.room_key = room_key
                     user.room_token = data.get("room_token")
+                    reset_room_tracking(user)
                     reset_round_state(user)
                     print(f"[ROOM] Observing room: ...{user.room_key[-5:]}")
                     await start_polling(rest, user, cfg)
@@ -626,6 +638,7 @@ async def process_command(raw_cmd: str, rest: REST, user: UserContext, cfg: Dict
                         await stop_polling(user)
                         user.room_key = None
                         user.room_token = None
+                        reset_room_tracking(user)
                         reset_round_state(user)
 
             elif cmd == "skip":
